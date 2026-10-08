@@ -87,11 +87,24 @@ function engine(on: On, files: Record<string, string>, base = BEFORE) {
     return { deny: 'ENOENT' }
   })
   on('fs.read', ($, e) => (e.path in files ? { value: files[e.path]! } : { deny: 'no such file' }))
+  // A directory's entries: the next part of each file path under it, a directory if more follow.
+  on('fs.list', ($, e) => {
+    const dir = e.path.replace(/\/+$/, '')
+    const kinds = new Map<string, 'file' | 'dir'>()
+    for (const f of Object.keys(files)) {
+      if (!f.startsWith(`${dir}/`)) continue
+      const [name, ...more] = f.slice(dir.length + 1).split('/')
+      if (kinds.get(name!) !== 'dir') kinds.set(name!, more.length > 0 ? 'dir' : 'file')
+    }
+    return { value: [...kinds].map(([name, kind]) => ({ name, kind, size: 0, mtimeMs: 0, isLink: false })) }
+  })
   // A minute later at each call, so changes and comments have an order.
   let now = Date.UTC(2026, 9, 7, 1, 2)
   on('clock.now', () => ({ value: (now += 60_000) }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.toast', () => ({ value: undefined }))
+  // The engine's own typeahead rows for a token: none here.
+  on('prompt.autocomplete', () => ({ suggestions: [] }))
   on('ui.focus', ($, e) => {
     if (e.origin.kind === 'person') moves.push(`ring ${e.element}`)
     const deny = focusDenials.shift()
@@ -581,6 +594,70 @@ describe('review pane', () => {
     await turn('t6', [c], () => {}, true)
     ;({ labels } = await list())
     expect(names(labels)).toEqual(['c.ts', 'a.ts', 'd.md'])
+  })
+
+  test('1 opens a path input: it offers the opened files and the directory, and opens what Enter names', async ($, on) => {
+    const notes = '/repo/notes/plan.md'
+    engine(on, { [FILE]: AFTER, '/repo/src/fob.ts': 'x\n', [notes]: '계획\n' })
+    await editTurn($)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const offers = async () => (await ui.findAll({ type: 'Button' })).filter(x => /^O\d+$/.test(x.key ?? '')).map(x => x.text.trim())
+    const title = async () => (await ui.find({ type: 'Text', text: /열 파일 경로|파일이 없습니다|파일이 아닙니다/ }))?.text
+
+    // An empty Enter closes it, and nothing has been opened by path yet.
+    await ui.press({ key: 'key-1' })
+    expect(await ui.find({ key: 'path-input' })).toBeDefined()
+    expect(await offers()).toEqual([])
+    await ui.input({ key: 'path-input', text: '' })
+    expect(await ui.find({ key: 'path-input' })).toBeUndefined()
+
+    // A name that is no file keeps the input open, saying why, with the text to fix.
+    await ui.press({ key: 'key-1' })
+    await ui.input({ key: 'path-input', text: 'src/nope.ts' })
+    expect(await title()).toMatch('src/nope.ts 파일이 없습니다.')
+    expect((await ui.find({ key: 'path-input' }))?.props.value).toBe('src/nope.ts')
+
+    // As it is typed it offers what completes it: a directory fills the input, a file opens.
+    await ui.input({ key: 'path-input', text: 'sr', kind: 'change' })
+    expect(await offers()).toEqual(['src/'])
+    await ui.press({ key: 'O0' })
+    expect((await ui.find({ key: 'path-input' }))?.props.value).toBe('src/')
+    await ui.input({ key: 'path-input', text: 'src/fo', kind: 'change' })
+    expect(await offers()).toEqual(['src/fob.ts', 'src/foo.ts'])
+    await ui.press({ key: 'O1' })
+    // The recent turn changed foo.ts: it opens as that diff, where 2 switches to the whole file.
+    expect(await ui.find({ key: 'key-2' })).toBeDefined()
+
+    // Typed in full, a file opens whole; both stay as opened, latest first, filtered by the text.
+    await ui.press({ key: 'key-1' })
+    await ui.press({ key: 'key-1' })
+    await ui.input({ key: 'path-input', text: 'notes/plan.md' })
+    expect(await ui.find({ type: 'Text', text: /notes\/plan\.md · L/ })).toBeDefined()
+    await ui.press({ key: 'key-1' })
+    await ui.press({ key: 'key-1' })
+    expect(await offers()).toEqual(['↺ notes/plan.md', '↺ src/foo.ts'])
+    await ui.input({ key: 'path-input', text: 'plan', kind: 'change' })
+    expect(await offers()).toEqual(['↺ notes/plan.md'])
+    // Every offer is drawn dim; a file opened before is marked ↺, an entry of the directory not.
+    await ui.input({ key: 'path-input', text: 'src/f', kind: 'change' })
+    expect(await offers()).toEqual(['↺ src/foo.ts', 'src/fob.ts'])
+    expect((await ui.find({ key: 'O0' }))?.props.dimColor).toBe(true)
+    expect((await ui.find({ key: 'O1' }))?.props.dimColor).toBe(true)
+    await ui.unmount()
+  })
+
+  test('in the prompt, /redpen <path> completes the path being typed', async ($, on) => {
+    engine(on, { [FILE]: AFTER, '/repo/src/fob.ts': 'x\n' })
+    await editTurn($)
+    const complete = async (text: string) => {
+      const start = text.lastIndexOf(' ') + 1
+      const result = await $.prompt.autocomplete({ text, cursor: text.length, token: text.slice(start), start })
+      return result.suggestions.map(s => s.text)
+    }
+    expect(await complete('/redpen sr')).toEqual(['src/'])
+    expect(await complete('/redpen src/fo')).toEqual(['src/fob.ts', 'src/foo.ts'])
+    // Only the argument of /redpen: elsewhere in the prompt nothing joins.
+    expect(await complete('see src/fo')).toEqual([])
   })
 
   test('a list taller than the pane shows a window around the cursor, so ↑ and ↓ still move', async ($, on) => {

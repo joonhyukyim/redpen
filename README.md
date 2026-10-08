@@ -29,7 +29,7 @@ It installs for the user scope; pick another with `-s`.
 | Command          | What it does |
 | ---------------- | ------------ |
 | `/redpen`        | Opens a list of Claude's last reply, the files Claude changed in its most recent turn that changed files, and the session's other files |
-| `/redpen <path>` | Opens a file. If Claude changed it in that recent turn, the diff opens; otherwise the whole file. A directory is refused |
+| `/redpen <path>` | Opens a file. If Claude changed it in that recent turn, the diff opens; otherwise the whole file. A directory is refused. The path completes in the prompt's typeahead |
 
 The list has two parts. Under `최근 수정` are the files of Claude's most recent turn that changed files, each opening as that turn's diff; a turn that changes nothing leaves them as they are, and a turn you interrupt counts. Under `파일 목록` are the session's other files: those changed in earlier turns and those with comments alone, latest first, each opening whole. The list starts empty after `/clear`, a resume or a restart.
 
@@ -44,7 +44,10 @@ List screen
 | Hotkey  | Action |
 | ------- | ------ |
 | ↑↓, `Enter` | Move to an entry (Claude's last reply is always the first) and open it |
+| `1`     | Open a file by path (see below) |
 | `0`     | Send all comments |
+
+`1` opens a path input in place of the hotkeys. Type a path as for `/redpen <path>` and press Enter; an empty Enter closes it, and a path that isn't a file keeps it open with the reason. Under it are offers for what you typed: files you opened by path this session (up to 10, latest first, marked `↺`), then the entries of the typed directory that complete it, all drawn dim. Move to one with ↓ and press Enter: a directory fills the input, a file opens.
 
 Document screen
 

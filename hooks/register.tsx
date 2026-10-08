@@ -3,6 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Comment, Composing, Held, RecentTurn, Sent, SessionFile, Source, View } from '../types'
 import { diffRows, splitLines } from './diff'
+import { completions, expand, splitTyped } from './paths'
 import type { Row } from './diff'
 import { cells, cut, wrapRows } from './text'
 
@@ -40,6 +41,10 @@ const turn = atom({ plugin: 'redpen', key: 'turn' } as const, null as string | n
 const recent = atom({ plugin: 'redpen', key: 'recent' } as const, null as RecentTurn | null)
 const edited = atom({ plugin: 'redpen', key: 'edited' } as const, [] as SessionFile[])
 const snapshot = atom({ plugin: 'redpen', key: 'snapshot' } as const, [] as Held[])
+// Files opened by path, latest first: offered again when a path is typed.
+const opened = atom({ plugin: 'redpen', key: 'opened' } as const, [] as string[])
+const OPENED_MAX = 10
+const OFFERS_MAX = 8
 const view = atom({ plugin: 'redpen', key: 'view' } as const, { screen: 'list' } as View)
 const comments = atom({ plugin: 'redpen', key: 'comments' } as const, [] as Comment[])
 const sent = atom({ plugin: 'redpen', key: 'sent' } as const, null as Sent | null)
@@ -224,20 +229,78 @@ async function openReply($: Engine) {
 let lastRing = ''
 let retrying = false
 
+// Opens the file a typed path names: the recent turn's diff if that turn changed it, else the
+// whole file, and keeps it in the opened files. Says why when it opens nothing.
+async function openPath($: Engine, typed: string): Promise<string | null> {
+  const given = expand(typed, await $.session.cwd(), (await $.env.get('HOME')) ?? '')
+  const stat = await statPath($, given)
+  if (stat === undefined) return `${typed} 파일이 없습니다.`
+  if (stat.kind !== 'file') return `${typed} 은(는) 파일이 아닙니다.`
+  const path = stat.realPath ?? given
+  await update($, opened, list => [path, ...list.filter(p => p !== path)].slice(0, OPENED_MAX))
+  const changed = (await read($, recent))?.files.find(f => f.path === path)
+  await openDoc($, changed ? { kind: 'diff', path, base: changed.base } : { kind: 'file', path })
+  return null
+}
+
+// `opened`: a file opened by path before, marked ↺ apart from the directory's entries.
+type Offer = { label: string; open: string; isDir: boolean; opened: boolean }
+
+// The entries of a typed path's directory, the last listing kept: every key typed asks again.
+let lastListing: { dir: string; entries: { name: string; kind: 'file' | 'dir' | 'other' }[] } | null = null
+
+// What a typed path offers: the opened files whose shown path holds the text, then the entries
+// of the typed directory that complete it. A directory's offer fills the input, a file's opens.
+async function pathOffers($: Engine, typed: string): Promise<Offer[]> {
+  const cwd = await $.session.cwd()
+  const home = (await $.env.get('HOME')) ?? ''
+  const shown = (path: string) => {
+    const rel = relative(path, cwd)
+    return home !== '' && rel.startsWith(`${home}/`) ? `~${rel.slice(home.length)}` : rel
+  }
+  const needle = typed.toLowerCase()
+  const offers: Offer[] = (await read($, opened))
+    .map(path => ({ label: shown(path), open: path, isDir: false, opened: true }))
+    .filter(o => o.label.toLowerCase().includes(needle))
+  if (typed !== '') {
+    const { dir } = splitTyped(typed)
+    const at = dir === '' ? cwd : expand(dir, cwd, home)
+    if (lastListing?.dir !== at) lastListing = { dir: at, entries: await $.fs.list(at).catch(() => []) }
+    for (const c of completions(typed, lastListing.entries, OFFERS_MAX)) {
+      if (!offers.some(o => o.label === c.text)) offers.push({ label: c.text, open: c.text, isDir: c.isDir, opened: false })
+    }
+  }
+  return offers.slice(0, OFFERS_MAX)
+}
+
+async function setPath($: Engine, path: { text: string; error: string | null } | undefined) {
+  await update($, view, v => (v.screen === 'list' ? { ...v, path } : v))
+}
+
+async function submitPath($: Engine, typed: string) {
+  const text = typed.trim()
+  // An empty Enter closes the input, as it cancels a new comment.
+  if (text === '') return setPath($, undefined)
+  const error = await openPath($, text)
+  if (error !== null) {
+    await setPath($, { text: typed, error })
+    focus($, 'path-input')
+  }
+}
+
+async function pickOffer($: Engine, offer: Offer) {
+  if (!offer.isDir) return submitPath($, offer.open)
+  await setPath($, { text: offer.open, error: null })
+  focus($, 'path-input')
+}
+
 async function openReview($: Engine, args: string) {
   const arg = args.trim()
   if (arg === '') {
     await update($, view, (): View => ({ screen: 'list' }))
   } else {
-    const cwd = await $.session.cwd()
-    const home = (await $.env.get('HOME')) ?? ''
-    const given = arg.startsWith('/') ? arg : (arg === '~' || arg.startsWith('~/')) && home !== '' ? home + arg.slice(1) : `${cwd}/${arg}`
-    const stat = await statPath($, given)
-    if (stat === undefined) return { text: `${arg} 파일이 없습니다.` }
-    if (stat.kind !== 'file') return { text: `${arg} 은(는) 파일이 아닙니다.` }
-    const path = stat.realPath ?? given
-    const changed = (await read($, recent))?.files.find(f => f.path === path)
-    await openDoc($, changed ? { kind: 'diff', path, base: changed.base } : { kind: 'file', path })
+    const error = await openPath($, arg)
+    if (error !== null) return { text: error }
   }
   // Above the prompt the pane asks for 20 rows rather than a third of the screen.
   await $.ui.open({ id: PANE, title: 'redpen', focus: true, rows: 20 })
@@ -454,6 +517,20 @@ export const register: Register = on => {
 
   on('command.run', { command: 'redpen' }, ($, e) => openReview($, e.args))
 
+  // In the prompt, /redpen <path> completes the path typed: the opened files that hold it and
+  // the entries of its directory join the typeahead, a directory's taken to type on in.
+  on('prompt.autocomplete', async ($, e, next) => {
+    const answered = await next(e)
+    if (e.text.slice(0, e.start).trimEnd() !== '/redpen') return answered
+    const offers = await pathOffers($, e.token)
+    return {
+      suggestions: [
+        ...answered.suggestions,
+        ...offers.map(o => ({ text: o.label, ...(o.isDir ? { description: '디렉토리' } : {}) })),
+      ],
+    }
+  })
+
   // Edit, Write and NotebookEdit say what they changed; a file the list knows that Bash or an
   // MCP tool changed shows only in its content. So what each known file holds is kept as the
   // turn begins, and compared as the turn ends.
@@ -598,13 +675,16 @@ export const register: Register = on => {
       const total = 1 + entries.length
       const cursor = Math.max(0, Math.min(v.cursor ?? 0, total - 1))
       const keyOf = (k: number) => (k === 0 ? 'reply' : `F${k - 1}`)
-      // The ring starts on the cursor's entry, as it starts on the cursor line in a document.
+      // The ring starts on the cursor's entry, as it starts on the cursor line in a document;
+      // on the path input while it is open.
+      const typing = v.path
+      const offers = typing === undefined ? [] : await pathOffers($, typing.text)
       const item = (k: number) =>
         k === 0 ? (
           <Button
             plain
             key="reply"
-            autoFocus={k === cursor || undefined}
+            autoFocus={(k === cursor && typing === undefined) || undefined}
             label={cut(`${REPLY} · 코멘트 ${count(REPLY)}`, Math.max(1, width - 3))}
             onPress={() => openReply($)}
           />
@@ -612,7 +692,7 @@ export const register: Register = on => {
           <Button
             plain
             key={`F${k - 1}`}
-            autoFocus={k === cursor || undefined}
+            autoFocus={(k === cursor && typing === undefined) || undefined}
             label={entryLabel(entries[k - 1]!)}
             onPress={() => openDoc($, entries[k - 1]!.source)}
           />
@@ -621,12 +701,20 @@ export const register: Register = on => {
       // As in a document, the tree must never be taller than the pane, or the arrows scroll it.
       // While every entry fits, the list shows whole, the blank rows giving way first. Past
       // that the entries show in a window around the cursor, without the blank rows and the
-      // titles, and the rest give way in order: the pane's keys, the header, the keys' hint.
-      // The window keeps five entries' room while the pane's keys show; then the cursor's entry
-      // and one past each end of it, the least ↑ and ↓ need to move.
+      // titles, and the rest give way in order: the pane's keys and the path input's offers,
+      // the header, the keys' hint. The window keeps five entries' room while the pane's keys
+      // show; then the cursor's entry and one past each end of it, the least ↑ and ↓ need.
       type Parts = { header: boolean; gaps: boolean; hint: boolean; keys: boolean }
-      const footerRows = (hint: boolean) =>
-        flowRows([...(hint ? LIST_KEYS.map(hintWidth) : []), cells(`0: 전송 (${all.length})`)], 2, width)
+      const pathTitle = typing?.error ?? '열 파일 경로 · 빈 Enter 취소'
+      // The footer: the hotkeys, or while it is open the path input, its title and its offers.
+      const footerRows = (p: Parts) =>
+        typing !== undefined
+          ? wrapRows(pathTitle, width).length + 1 + (p.keys ? offers.length : 0)
+          : flowRows(
+              [...(p.hint ? LIST_KEYS.map(hintWidth) : []), cells('1: 경로로 열기'), cells(`0: 전송 (${all.length})`)],
+              2,
+              width,
+            )
       // Each part's title, the first's note when it is empty; a blank row before the second.
       const titleRows = (changed.length === 0 ? 2 : 1) + (earlier.length > 0 ? 1 : 0)
       const gapRows = earlier.length > 0 ? 4 : 3
@@ -634,7 +722,7 @@ export const register: Register = on => {
         (p.header ? 1 : 0) +
         (p.gaps && !windowed ? gapRows : 0) +
         (windowed ? 0 : titleRows) +
-        footerRows(p.hint) +
+        footerRows(p) +
         (p.keys ? paneKeyRows(width) : 0)
       const every: Parts = { header: true, gaps: true, hint: true, keys: true }
       const bare: Parts = { ...every, gaps: false }
@@ -662,7 +750,8 @@ export const register: Register = on => {
       const room = windowed ? Math.min(total, bodyRows - chrome(parts, true) - 1) : total
       const top = Math.max(0, Math.min(cursor - Math.floor((room - 1) / 2), total - room))
       const shown = Array.from({ length: room }, (_, k) => top + k)
-      pinRing($, shown.map(keyOf).join(' '), keyOf(cursor), e.props.isFocused)
+      // While the path input is open the ring is the person's to move, as in a comment input.
+      pinRing($, shown.map(keyOf).join(' '), typing === undefined ? keyOf(cursor) : null, e.props.isFocused)
 
       return (
         <Box flexDirection="column">
@@ -683,10 +772,42 @@ export const register: Register = on => {
             </Box>
           )}
           {parts.gaps && <Text> </Text>}
-          <Box flexWrap="wrap" columnGap={2}>
-            {parts.hint && LIST_KEYS.map(keyHint)}
-            <Button plain key="key-0" hotkey="0" label={`전송 (${all.length})`} onPress={() => void submit($)} />
-          </Box>
+          {typing !== undefined ? (
+            <Box flexDirection="column">
+              <Text color={typing.error === null ? undefined : 'warning'}>{pathTitle}</Text>
+              <Input
+                key="path-input"
+                placeholder="경로 입력 후 Enter"
+                value={typing.text}
+                submitLabel="열기"
+                autoFocus
+                onInput={value => void setPath($, { text: value, error: null })}
+                onSubmit={value => void submitPath($, value)}
+              />
+              {parts.keys &&
+                offers.map((offer, i) => (
+                  <Button
+                    plain
+                    key={`O${i}`}
+                    dimColor
+                    label={cut(`${offer.opened ? '↺' : ' '} ${offer.label}`, Math.max(1, width - 1))}
+                    onPress={() => void pickOffer($, offer)}
+                  />
+                ))}
+            </Box>
+          ) : (
+            <Box flexWrap="wrap" columnGap={2}>
+              {parts.hint && LIST_KEYS.map(keyHint)}
+              <Button
+                plain
+                key="key-1"
+                hotkey="1"
+                label="경로로 열기"
+                onPress={() => void (setPath($, { text: '', error: null }).then(() => focus($, 'path-input')))}
+              />
+              <Button plain key="key-0" hotkey="0" label={`전송 (${all.length})`} onPress={() => void submit($)} />
+            </Box>
+          )}
           {parts.keys && paneKeys}
         </Box>
       )
