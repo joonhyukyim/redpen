@@ -148,7 +148,7 @@ async function submit($: Engine) {
   let list: Comment[] = []
   await update($, comments, now => ((list = now), []))
   if (list.length === 0) {
-    $.ui.toast('redpen: 보낼 코멘트가 없습니다.')
+    $.ui.toast('보낼 코멘트가 없습니다.')
     return
   }
   const putBack = () => update($, comments, now => [...list, ...now])
@@ -157,7 +157,7 @@ async function submit($: Engine) {
     text = await buildPrompt($, list)
   } catch {
     await putBack()
-    $.ui.toast('redpen: 프롬프트를 만들지 못했습니다.')
+    $.ui.toast('프롬프트를 만들지 못했습니다.')
     return
   }
   const at = await $.clock.now()
@@ -169,8 +169,8 @@ async function submit($: Engine) {
   }
   // Resolves only when the turn starts, so it is not awaited while Claude may be working.
   void $.prompt.submit({ text, asUser: true }).then(
-    result => ('drop' in result && result.drop !== undefined ? undo(`redpen: 전송이 거절되었습니다: ${result.drop}`) : undefined),
-    () => undo('redpen: 전송하지 못했습니다.'),
+    result => ('drop' in result && result.drop !== undefined ? undo(`전송이 거절되었습니다: ${result.drop}`) : undefined),
+    () => undo('전송하지 못했습니다.'),
   )
 }
 
@@ -189,7 +189,7 @@ async function openDoc($: Engine, source: Source) {
 
 async function openReply($: Engine) {
   const text = await lastReply($)
-  if (text === null) $.ui.toast('redpen: Claude의 답변이 아직 없습니다.')
+  if (text === null) $.ui.toast('Claude의 답변이 아직 없습니다.')
   else await openDoc($, { kind: 'reply', text })
 }
 
