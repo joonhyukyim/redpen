@@ -532,6 +532,8 @@ describe('review pane', () => {
     await editTurn($)
     const refused = (await $.command.run({ command: 'redpen', args: 'src' } as never)) as { text?: string }
     expect(refused.text).toMatch('파일이 아닙니다')
+    // Claude Code puts "redpen:" before the command's output itself.
+    expect(refused.text).not.toMatch(/^redpen:/)
 
     await $.command.run({ command: 'redpen', args: './src/../src/foo.ts' } as never)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })

@@ -187,8 +187,8 @@ async function openReview($: Engine, args: string) {
     const home = (await $.env.get('HOME')) ?? ''
     const given = arg.startsWith('/') ? arg : (arg === '~' || arg.startsWith('~/')) && home !== '' ? home + arg.slice(1) : `${cwd}/${arg}`
     const stat = await statPath($, given)
-    if (stat === undefined) return { text: `redpen: ${arg} 파일이 없습니다.` }
-    if (stat.kind !== 'file') return { text: `redpen: ${arg} 은(는) 파일이 아닙니다.` }
+    if (stat === undefined) return { text: `${arg} 파일이 없습니다.` }
+    if (stat.kind !== 'file') return { text: `${arg} 은(는) 파일이 아닙니다.` }
     const path = stat.realPath ?? given
     const changed = (await read($, lastTurn)).find(f => f.path === path)
     await openDoc($, changed ? { kind: 'diff', path, base: changed.base } : { kind: 'file', path })
