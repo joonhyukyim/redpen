@@ -28,10 +28,10 @@ It installs for the user scope; pick another with `-s`.
 
 | Command          | What it does |
 | ---------------- | ------------ |
-| `/redpen`        | Opens a list of Claude's last reply and the files Claude changed most recently. Files you commented on are listed too |
-| `/redpen <path>` | Opens a file. If Claude edited that file in that turn, the diff opens; otherwise the whole file. A directory is refused |
+| `/redpen`        | Opens a list of Claude's last reply, the files Claude changed in its most recent turn that changed files, and the session's other files |
+| `/redpen <path>` | Opens a file. If Claude changed it in that recent turn, the diff opens; otherwise the whole file. A directory is refused |
 
-Each file in the list carries a tag: `new` (created), `edited`, or `commented` (not edited in that turn, listed because it has comments; it opens as the whole file).
+The list has two parts. Under `최근 수정` are the files of Claude's most recent turn that changed files, each opening as that turn's diff; a turn that changes nothing leaves them as they are, and a turn you interrupt counts. Under `파일 목록` are the session's other files: those changed in earlier turns and those with comments alone, latest first, each opening whole. The list starts empty after `/clear`, a resume or a restart.
 
 The pane takes keyboard focus when it opens. If focus doesn't move to it (the prompt has text in it, a dialog is open, or another pane holds the keys), press `Ctrl+X` `Tab`, or click the pane in the fullscreen terminal. `Esc` returns focus to the prompt, and `Ctrl+X` `Tab` moves it back to the pane. To close the pane, press `Ctrl+X` `X`; `/redpen` opens it again.
 
@@ -43,8 +43,7 @@ List screen
 
 | Hotkey  | Action |
 | ------- | ------ |
-| `1`     | Open Claude's last reply (always the first entry) |
-| `2`–`9` | Open one of the first eight files; later ones by ↑↓ and Enter |
+| ↑↓, `Enter` | Move to an entry (Claude's last reply is always the first) and open it |
 | `0`     | Send all comments |
 
 Document screen
@@ -94,15 +93,15 @@ When the file changes, a comment follows the text of its lines. If that text is 
 
 ## Privacy
 
-redpen reads only the files it shows and Claude's last reply, and sends a prompt only when you press `0`. It doesn't write files, run commands or use the network. Comments are kept until the session ends.
+redpen reads the files in its list (at the start and end of each turn, and when it shows them) and Claude's last reply, and sends a prompt only when you press `0`. It doesn't write files, run commands or use the network. Comments are kept until the session ends.
 
 ## Limitations
 
-- Only edits made with Edit, Write and NotebookEdit are listed. For files changed another way (Bash, MCP tools), use `/redpen <path>`.
+- Files Claude changes with Edit, Write or NotebookEdit are listed. A file already in the list is also listed when it changes any other way (Bash, an MCP tool, a subagent), once the turn ends. Any other file isn't; open it with `/redpen <path>`.
+- A file deleted during a turn leaves the list.
 - If a file was edited several times in one turn, the diff shows the whole turn's change.
 - Files over 4 MiB can't be opened. A very large change is shown as one block of deleted lines and one block of added lines.
 - A notebook's diff is its raw `.ipynb` JSON.
-- In a short pane the document drops the comments that lost their place, the rule and the pane's keys, the notes, the header and the hint before it shows fewer than three lines. Under 6 rows it shows only a notice (and the comment input, if one is open); enlarge the window or close the pane with `Ctrl+X` `X`.
-- In a list taller than the pane, the entries show in a window around the one the focus is on, without the blank rows and the `파일 목록` title; then the pane's keys, the header and the hint give way. A hotkey (`1`, `2`–`9`) works only on an entry in the window. Under 5 rows only a notice shows.
+- In a short pane, rows other than the lines and entries are left out so that ↑↓ keep moving, and a long list shows only the entries around the focus. A pane under 6 rows (a document) or 5 rows (the list) shows only a notice.
 - `Esc` doesn't cancel; it returns focus to the prompt. Cancel a range with `3`, a new comment with an empty Enter.
 - Works in the terminal. Not supported on mobile, the VS Code panel, `claude -p` or WSL. Not tested in the Desktop app.

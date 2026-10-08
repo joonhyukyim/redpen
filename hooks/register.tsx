@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Comment, Composing, Sent, Source, TurnFile, View } from '../types'
+import type { Comment, Composing, Held, RecentTurn, Sent, SessionFile, Source, View } from '../types'
 import { diffRows, splitLines } from './diff'
 import type { Row } from './diff'
 import { cells, cut, wrapRows } from './text'
@@ -17,8 +17,8 @@ const EXCERPT_MAX = 8
 type KeyHint = readonly [key: string, text: string]
 const KEY_COLOR = 'suggestion'
 const LIST_KEYS: KeyHint[] = [
-  ['1', '마지막 답변 열기'],
-  ['2-9', '파일 열기'],
+  ['↑↓', '이동'],
+  ['Enter', '열기'],
 ]
 const DOC_KEYS: KeyHint[] = [
   ['↑↓', '이동'],
@@ -33,8 +33,13 @@ const PANE_KEYS: KeyHint[] = [
 const hintWidth = ([key, text]: KeyHint) => cells(`${key}: ${text}`)
 const HEADER = '다음 리뷰 코멘트를 모두 반영해서 수정해줘. 코멘트가 지적한 부분 외에는 건드리지 마.'
 
-const pending = atom({ plugin: 'redpen', key: 'pending' } as const, [] as TurnFile[])
-const lastTurn = atom({ plugin: 'redpen', key: 'lastTurn' } as const, [] as TurnFile[])
+// The turn running now, the turn that last changed files, every file changed this session, and
+// what the files the list knows held when the running turn began. All last the session: /clear,
+// a resume and a restart start them anew.
+const turn = atom({ plugin: 'redpen', key: 'turn' } as const, null as string | null)
+const recent = atom({ plugin: 'redpen', key: 'recent' } as const, null as RecentTurn | null)
+const edited = atom({ plugin: 'redpen', key: 'edited' } as const, [] as SessionFile[])
+const snapshot = atom({ plugin: 'redpen', key: 'snapshot' } as const, [] as Held[])
 const view = atom({ plugin: 'redpen', key: 'view' } as const, { screen: 'list' } as View)
 const comments = atom({ plugin: 'redpen', key: 'comments' } as const, [] as Comment[])
 const sent = atom({ plugin: 'redpen', key: 'sent' } as const, null as Sent | null)
@@ -42,10 +47,31 @@ const sent = atom({ plugin: 'redpen', key: 'sent' } as const, null as Sent | nul
 // The path's stat with where it lands: absolute, links followed, . and .. folded.
 const statPath = ($: Engine, path: string) => $.fs.stat(path, { resolve: true }).catch(() => undefined)
 
+// Puts a change into the turn running now, the moment it is made, so a turn cut short keeps its
+// changes: the turn's first change makes it the recent turn, and a file keeps what it held
+// before the turn first changed it. The session's list takes the file as changed last.
 async function recordEdit($: Engine, filePath: string, base: string | null) {
   // Kept as /redpen <path> resolves it, so both name a file the same way.
   const path = (await statPath($, filePath))?.realPath ?? filePath
-  await update($, pending, list => (list.some(f => f.path === path) ? list : [...list, { path, base }]))
+  const turnId = (await read($, turn)) ?? ''
+  await update($, recent, r => {
+    const files = r?.turnId === turnId ? r.files : []
+    return { turnId, files: files.some(f => f.path === path) ? files : [...files, { path, base }] }
+  })
+  const at = await $.clock.now()
+  await update($, edited, list => [...list.filter(f => f.path !== path), { path, at }])
+}
+
+// A file gone from disk leaves the list.
+async function forget($: Engine, path: string) {
+  await update($, recent, r => (r === null ? r : { ...r, files: r.files.filter(f => f.path !== path) }))
+  await update($, edited, list => list.filter(f => f.path !== path))
+}
+
+// The files the list knows: those changed this session and those with comments.
+async function known($: Engine) {
+  const commented = (await read($, comments)).filter(c => c.kind !== 'reply').map(c => c.path)
+  return [...new Set([...(await read($, edited)).map(f => f.path), ...commented])]
 }
 
 // The last diff computed, by what it was computed from. A module variable: a reload drops it.
@@ -148,7 +174,7 @@ async function submit($: Engine) {
   let list: Comment[] = []
   await update($, comments, now => ((list = now), []))
   if (list.length === 0) {
-    $.ui.toast('redpen: 보낼 코멘트가 없습니다.')
+    $.ui.toast('보낼 코멘트가 없습니다.')
     return
   }
   const putBack = () => update($, comments, now => [...list, ...now])
@@ -157,7 +183,7 @@ async function submit($: Engine) {
     text = await buildPrompt($, list)
   } catch {
     await putBack()
-    $.ui.toast('redpen: 프롬프트를 만들지 못했습니다.')
+    $.ui.toast('프롬프트를 만들지 못했습니다.')
     return
   }
   const at = await $.clock.now()
@@ -169,8 +195,8 @@ async function submit($: Engine) {
   }
   // Resolves only when the turn starts, so it is not awaited while Claude may be working.
   void $.prompt.submit({ text, asUser: true }).then(
-    result => ('drop' in result && result.drop !== undefined ? undo(`redpen: 전송이 거절되었습니다: ${result.drop}`) : undefined),
-    () => undo('redpen: 전송하지 못했습니다.'),
+    result => ('drop' in result && result.drop !== undefined ? undo(`전송이 거절되었습니다: ${result.drop}`) : undefined),
+    () => undo('전송하지 못했습니다.'),
   )
 }
 
@@ -189,7 +215,7 @@ async function openDoc($: Engine, source: Source) {
 
 async function openReply($: Engine) {
   const text = await lastReply($)
-  if (text === null) $.ui.toast('redpen: Claude의 답변이 아직 없습니다.')
+  if (text === null) $.ui.toast('Claude의 답변이 아직 없습니다.')
   else await openDoc($, { kind: 'reply', text })
 }
 
@@ -210,7 +236,7 @@ async function openReview($: Engine, args: string) {
     if (stat === undefined) return { text: `${arg} 파일이 없습니다.` }
     if (stat.kind !== 'file') return { text: `${arg} 은(는) 파일이 아닙니다.` }
     const path = stat.realPath ?? given
-    const changed = (await read($, lastTurn)).find(f => f.path === path)
+    const changed = (await read($, recent))?.files.find(f => f.path === path)
     await openDoc($, changed ? { kind: 'diff', path, base: changed.base } : { kind: 'file', path })
   }
   // Above the prompt the pane asks for 20 rows rather than a third of the screen.
@@ -372,6 +398,7 @@ async function save($: Engine, text: string) {
       path: docPath(v.source),
       ...composing.lines,
       text: body,
+      at: await $.clock.now(),
     }
     await update($, comments, list => [...list, comment])
   }
@@ -427,14 +454,35 @@ export const register: Register = on => {
 
   on('command.run', { command: 'redpen' }, ($, e) => openReview($, e.args))
 
+  // Edit, Write and NotebookEdit say what they changed; a file the list knows that Bash or an
+  // MCP tool changed shows only in its content. So what each known file holds is kept as the
+  // turn begins, and compared as the turn ends.
   on('turn.start', async ($, e, next) => {
-    await update($, pending, () => [])
+    await update($, turn, () => e.turnId)
+    const paths = await known($)
+    const texts = await Promise.all(paths.map(path => $.fs.read(path).catch(() => null)))
+    await update($, snapshot, () => paths.flatMap((path, i) => (texts[i] === null ? [] : [{ path, text: texts[i]! }])))
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
-    const files = await read($, pending)
-    if (e.agentId === undefined && files.length > 0) await update($, lastTurn, () => files)
+    if (e.agentId === undefined) {
+      const held = await read($, snapshot)
+      await update($, snapshot, () => [])
+      const turnId = await read($, turn)
+      const r = await read($, recent)
+      const recorded = r !== null && r.turnId === turnId ? r.files.map(f => f.path) : []
+      for (const { path, text } of held) {
+        if ((await statPath($, path)) === undefined) {
+          await forget($, path)
+          continue
+        }
+        // A file the turn's own tools recorded keeps the content before their first change.
+        if (recorded.includes(path)) continue
+        const now = await $.fs.read(path).catch(() => null)
+        if (now !== null && now !== text) await recordEdit($, path, text)
+      }
+    }
     return next(e)
   })
 
@@ -522,26 +570,31 @@ export const register: Register = on => {
     )
 
     if (v.screen === 'list') {
-      const changed = await read($, lastTurn)
-      const others = [...new Set(all.filter(c => c.kind !== 'reply').map(c => c.path))].filter(
-        path => !changed.some(f => f.path === path),
-      )
-      const entries: { path: string; source: Source; tag: string }[] = [
-        ...changed.map(f => ({
-          path: f.path,
-          source: { kind: 'diff', path: f.path, base: f.base } as Source,
-          tag: f.base === '' ? 'new' : 'edited',
-        })),
-        ...others.map(path => ({ path, source: { kind: 'file', path } as Source, tag: 'commented' })),
+      // Two parts: the files the recent turn changed, each opening as that turn's diff; then
+      // every other file of the session, changed earlier or holding comments alone, latest
+      // first (by its last change, else its last comment), each opening whole.
+      const changed = (await read($, recent))?.files ?? []
+      const lastChange = new Map((await read($, edited)).map(f => [f.path, f.at]))
+      const lastComment = new Map<string, number>()
+      for (const c of all) {
+        if (c.kind !== 'reply') lastComment.set(c.path, Math.max(lastComment.get(c.path) ?? 0, c.at ?? 0))
+      }
+      const when = (path: string) => lastChange.get(path) ?? lastComment.get(path) ?? 0
+      const earlier = [...new Set([...lastChange.keys(), ...lastComment.keys()])]
+        .filter(path => !changed.some(f => f.path === path))
+        .sort((a, b) => when(b) - when(a))
+      const entries: { path: string; source: Source }[] = [
+        ...changed.map(f => ({ path: f.path, source: { kind: 'diff', path: f.path, base: f.base } as Source })),
+        ...earlier.map(path => ({ path, source: { kind: 'file', path } as Source })),
       ]
       const count = (path: string) => all.filter(c => c.path === path).length
       const home = (await $.env.get('HOME')) ?? ''
-      // The tag and the count always show; the path takes the room left after "2: ".
-      const entryLabel = (entry: { path: string; tag: string }) => {
-        const suffix = ` (${entry.tag}) · 코멘트 ${count(entry.path)}`
-        return `${fitPath(relative(entry.path, cwd), home, Math.max(1, width - 4 - cells(suffix)))}${suffix}`
+      // The count always shows; the path takes the room left.
+      const entryLabel = (entry: { path: string }) => {
+        const suffix = ` · 코멘트 ${count(entry.path)}`
+        return `${fitPath(relative(entry.path, cwd), home, Math.max(1, width - 1 - cells(suffix)))}${suffix}`
       }
-      // The entries the ring moves along, one row each: the reply (always 1), then the files.
+      // The entries the ring moves along, one row each: the reply, then the files.
       const total = 1 + entries.length
       const cursor = Math.max(0, Math.min(v.cursor ?? 0, total - 1))
       const keyOf = (k: number) => (k === 0 ? 'reply' : `F${k - 1}`)
@@ -552,7 +605,6 @@ export const register: Register = on => {
             plain
             key="reply"
             autoFocus={k === cursor || undefined}
-            hotkey="1"
             label={cut(`${REPLY} · 코멘트 ${count(REPLY)}`, Math.max(1, width - 3))}
             onPress={() => openReply($)}
           />
@@ -561,7 +613,6 @@ export const register: Register = on => {
             plain
             key={`F${k - 1}`}
             autoFocus={k === cursor || undefined}
-            hotkey={k < 9 ? String(k + 1) : undefined}
             label={entryLabel(entries[k - 1]!)}
             onPress={() => openDoc($, entries[k - 1]!.source)}
           />
@@ -570,16 +621,18 @@ export const register: Register = on => {
       // As in a document, the tree must never be taller than the pane, or the arrows scroll it.
       // While every entry fits, the list shows whole, the blank rows giving way first. Past
       // that the entries show in a window around the cursor, without the blank rows and the
-      // title, and the rest give way in order: the pane's keys, the header, the keys' hint.
+      // titles, and the rest give way in order: the pane's keys, the header, the keys' hint.
       // The window keeps five entries' room while the pane's keys show; then the cursor's entry
       // and one past each end of it, the least ↑ and ↓ need to move.
       type Parts = { header: boolean; gaps: boolean; hint: boolean; keys: boolean }
       const footerRows = (hint: boolean) =>
         flowRows([...(hint ? LIST_KEYS.map(hintWidth) : []), cells(`0: 전송 (${all.length})`)], 2, width)
-      const titleRows = changed.length === 0 ? 2 : 1
+      // Each part's title, the first's note when it is empty; a blank row before the second.
+      const titleRows = (changed.length === 0 ? 2 : 1) + (earlier.length > 0 ? 1 : 0)
+      const gapRows = earlier.length > 0 ? 4 : 3
       const chrome = (p: Parts, windowed: boolean) =>
         (p.header ? 1 : 0) +
-        (p.gaps ? 3 : 0) +
+        (p.gaps && !windowed ? gapRows : 0) +
         (windowed ? 0 : titleRows) +
         footerRows(p.hint) +
         (p.keys ? paneKeyRows(width) : 0)
@@ -621,9 +674,12 @@ export const register: Register = on => {
             <Box flexDirection="column">
               {item(0)}
               {parts.gaps && <Text> </Text>}
-              <Text bold>파일 목록</Text>
+              <Text bold>최근 수정</Text>
               {changed.length === 0 && <Text dimColor>  없음. /redpen &lt;path&gt; 로 임의 파일을 열 수 있습니다.</Text>}
-              {entries.map((_, i) => item(i + 1))}
+              {changed.map((_, i) => item(i + 1))}
+              {earlier.length > 0 && parts.gaps && <Text> </Text>}
+              {earlier.length > 0 && <Text bold>파일 목록</Text>}
+              {earlier.map((_, i) => item(changed.length + i + 1))}
             </Box>
           )}
           {parts.gaps && <Text> </Text>}
