@@ -175,8 +175,10 @@ async function openReply($: Engine) {
   else await openDoc($, { kind: 'reply', text })
 }
 
-// The Buttons the document drew last, in order. See where the window is drawn.
+// The Buttons the document drew last, in order, and whether the next try at putting the ring
+// back on ▶ is the one retry a denied try gets. See where the window is drawn.
 let lastRing = ''
+let retrying = false
 
 async function openReview($: Engine, args: string) {
   const arg = args.trim()
@@ -217,8 +219,12 @@ async function setDoc($: Engine, fn: (v: Doc) => Doc) {
   await update($, view, v => (v.screen === 'doc' ? fn(v) : v))
 }
 
-// Best effort: the ring cannot move while the pane does not hold the keyboard.
-const focus = ($: Engine, key: string) => void $.ui.focus({ requestId: PANE, key }).catch(() => undefined)
+// `{ deny }` when the ring did not move (the pane not holding the keyboard, the element not
+// drawn in time, another move first); null when the engine could not take the call at all.
+const tryFocus = ($: Engine, key: string) => $.ui.focus({ requestId: PANE, key }).catch(() => null)
+
+// Best effort: the result is not waited for.
+const focus = ($: Engine, key: string) => void tryFocus($, key)
 
 const clock = (at: number) => {
   const d = new Date(at)
@@ -414,6 +420,10 @@ export const register: Register = on => {
   on('ui.focus', { requestId: PANE }, async ($, e, next) => {
     // The footer keys answer their hotkeys only; the ring stays on the lines.
     if (e.element?.startsWith('key-')) return { deny: 'redpen: 단축키 안내는 포커스를 받지 않습니다.' }
+    // The ring moves first, ▶ after it, and only where it landed. Moving ▶ first redraws the
+    // window before the move, and the move then lands by its place among the redrawn Buttons.
+    const moved = await next(e)
+    if (moved.deny !== undefined) return moved
     // ▶ is where the ring is: one position, so Enter always acts where ▶ points.
     const line = /^L(\d+)$/.exec(e.element ?? '')
     const comment = /^C(.+)$/.exec(e.element ?? '')
@@ -427,7 +437,7 @@ export const register: Register = on => {
         await setDoc($, d => ({ ...d, cursor: row ?? d.cursor, focused: comment[1]! }))
       }
     }
-    return next(e)
+    return moved
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -701,7 +711,8 @@ export const register: Register = on => {
     // The pane keeps the ring on a Button by its place among the Buttons drawn, not by its key:
     // when the window gains or loses a line above ▶, the ring lands on a neighbour and no
     // ui.focus is raised. Whenever the drawn Buttons change, put the ring back on ▶'s element
-    // once this drawing is on screen.
+    // once this drawing is on screen. A try that is denied (the element not drawn in time,
+    // another move first) gets one more after a fresh drawing, aimed at ▶ as it stands then.
     const edgeKeys = (list: number[]) => list.filter(i => isLine(rows[i])).map(i => `L${i}`)
     const ring = [
       ...(full ? away.slice(0, 5).map(({ c }) => `C${c.id}`) : []),
@@ -714,7 +725,17 @@ export const register: Register = on => {
     ].join(' ')
     if (ring !== lastRing && e.props.isFocused && start !== null) {
       const key = start
-      void $.clock.sleep(0).then(() => focus($, key))
+      const retry = retrying
+      retrying = false
+      void $.clock
+        .sleep(0)
+        .then(() => tryFocus($, key))
+        .then(result => {
+          if (result?.deny === undefined || retry) return
+          retrying = true
+          lastRing = ''
+          $.ui.invalidate('ui.render')
+        })
     }
     lastRing = ring
 
