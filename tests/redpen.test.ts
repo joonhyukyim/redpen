@@ -534,7 +534,7 @@ describe('review pane', () => {
     await ui.unmount()
   })
 
-  test("the list: the recent turn's files as diffs, then the session's other files latest first", async ($, on) => {
+  test("the list: the recent turn's files as diffs, then those waiting to be sent; 1 offers the rest", async ($, on) => {
     const [a, b, c, d] = ['/repo/src/a.ts', '/repo/src/b.ts', '/repo/src/c.ts', '/repo/notes/d.md']
     const files: Record<string, string> = { [a]: AFTER, [b]: AFTER, [c]: AFTER, [d]: 'note\n' }
     engine(on, files)
@@ -552,6 +552,13 @@ describe('review pane', () => {
       return { ui, labels }
     }
     const names = (labels: string[]) => labels.map(l => /(\w+\.\w+) ·/.exec(l)?.[1])
+    // What 1 offers before anything is typed: the session's files the list does not show.
+    const offered = async (ui: Awaited<ReturnType<typeof list>>['ui']) => {
+      await ui.press({ key: 'key-1' })
+      const offers = (await ui.findAll({ type: 'Button' })).filter(x => /^O\d+$/.test(x.key ?? '')).map(x => x.text.trim())
+      await ui.input({ key: 'path-input', text: '' })
+      return offers
+    }
 
     // t1 edits a; then d gets a comment, without any edit.
     await turn('t1', [a])
@@ -566,14 +573,16 @@ describe('review pane', () => {
     await turn('t3', [])
     await $.command.run({ command: 'redpen', args: '' } as never)
     let { ui, labels } = await list()
-    expect(names(labels)).toEqual(['b.ts', 'c.ts', 'd.md', 'a.ts'])
+    // a, changed in an earlier turn without comments, is not listed but offered by 1.
+    expect(names(labels)).toEqual(['b.ts', 'c.ts', 'd.md'])
     expect(await ui.find({ type: 'Text', text: '최근 수정' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '파일 목록' })).toBeDefined()
-    // The recent turn's file opens as its diff, an earlier one whole: 2 switches a diff alone.
+    expect(await ui.find({ type: 'Text', text: '전송 대기' })).toBeDefined()
+    expect(await offered(ui)).toEqual(['↺ src/a.ts'])
+    // The recent turn's file opens as its diff, one waiting to be sent whole: 2 switches a diff alone.
     await ui.press({ key: 'F0' })
     expect(await ui.find({ key: 'key-2' })).toBeDefined()
     await ui.press({ key: 'key-1' })
-    await ui.press({ key: 'F3' })
+    await ui.press({ key: 'F2' })
     expect(await ui.find({ key: 'key-2' })).toBeUndefined()
     await ui.press({ key: 'key-1' })
     await ui.unmount()
@@ -582,29 +591,31 @@ describe('review pane', () => {
     // its diff from what it held as t4 began.
     await turn('t4', [], () => (files[a] = AFTER.replace('c\n', 'c2\n')))
     ;({ ui, labels } = await list())
-    expect(names(labels)).toEqual(['a.ts', 'c.ts', 'b.ts', 'd.md'])
+    expect(names(labels)).toEqual(['a.ts', 'd.md'])
+    expect(await offered(ui)).toEqual(['↺ src/c.ts', '↺ src/b.ts'])
     await ui.press({ key: 'F0' })
     expect(await ui.find({ type: 'Text', text: /\+ c2/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /\+ helper\(\)/ })).toBeUndefined()
     await ui.press({ key: 'key-1' })
     await ui.unmount()
 
-    // t5 deletes b: it leaves the list. t6, cut short, still makes c's edit the recent turn.
+    // t5 deletes b: it is offered no more. t6, cut short, still makes c's edit the recent turn.
     await turn('t5', [], () => delete files[b])
     await turn('t6', [c], () => {}, true)
     ;({ ui, labels } = await list())
-    expect(names(labels)).toEqual(['c.ts', 'a.ts', 'd.md'])
+    expect(names(labels)).toEqual(['c.ts', 'd.md'])
+    expect(await offered(ui)).toEqual(['↺ src/a.ts'])
     await ui.unmount()
   })
 
-  test('1 opens a path input: it offers the opened files and the directory, and opens what Enter names', async ($, on) => {
+  test("1 opens a file: it offers the session's files and the directory, and opens what Enter names", async ($, on) => {
     const notes = '/repo/notes/plan.md'
     const files: Record<string, string> = { [FILE]: AFTER, '/repo/src/fob.ts': 'x\n', [notes]: '계획\n' }
     engine(on, files)
     await editTurn($)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     const offers = async () => (await ui.findAll({ type: 'Button' })).filter(x => /^O\d+$/.test(x.key ?? '')).map(x => x.text.trim())
-    const title = async () => (await ui.find({ type: 'Text', text: /열 파일 경로|파일이 없습니다|파일이 아닙니다/ }))?.text
+    const title = async () => (await ui.find({ type: 'Text', text: /파일 열기 ·|파일이 없습니다|파일이 아닙니다/ }))?.text
 
     // An empty Enter closes it, and nothing has been opened by path yet.
     await ui.press({ key: 'key-1' })
@@ -634,21 +645,38 @@ describe('review pane', () => {
     // The recent turn changed foo.ts: it opens as that diff, where 2 switches to the whole file.
     expect(await ui.find({ key: 'key-2' })).toBeDefined()
 
-    // Typed in full, a file opens whole; both stay as opened, latest first, filtered by the text.
+    // Typed in full, a file opens whole and is offered again while nothing is typed; foo.ts,
+    // under 최근 수정 on the list, is not.
     await ui.press({ key: 'key-1' })
     await ui.press({ key: 'key-1' })
     await ui.input({ key: 'path-input', text: 'notes/plan.md' })
     expect(await ui.find({ type: 'Text', text: /notes\/plan\.md · L/ })).toBeDefined()
     await ui.press({ key: 'key-1' })
     await ui.press({ key: 'key-1' })
-    expect(await offers()).toEqual(['↺ notes/plan.md', '↺ src/foo.ts'])
-    await ui.input({ key: 'path-input', text: 'plan', kind: 'change' })
     expect(await offers()).toEqual(['↺ notes/plan.md'])
-    // Every offer is drawn dim; a file opened before is marked ↺, an entry of the directory not.
+    expect((await ui.find({ key: 'O0' }))?.props.dimColor).toBe(true)
+    // Once a path is typed, only the entries that complete it, unmarked: the opened files give way.
+    await ui.input({ key: 'path-input', text: 'notes/p', kind: 'change' })
+    expect(await offers()).toEqual(['notes/plan.md'])
+    await ui.input({ key: 'path-input', text: 'plan', kind: 'change' })
+    expect(await offers()).toEqual([])
     await ui.input({ key: 'path-input', text: 'src/f', kind: 'change' })
-    expect(await offers()).toEqual(['↺ src/foo.ts', 'src/fob.ts', 'src/fox.ts'])
+    expect(await offers()).toEqual(['src/fob.ts', 'src/foo.ts', 'src/fox.ts'])
     expect((await ui.find({ key: 'O0' }))?.props.dimColor).toBe(true)
     expect((await ui.find({ key: 'O1' }))?.props.dimColor).toBe(true)
+    await ui.unmount()
+  })
+
+  test('opened files kept as bare paths, as 0.3.1 kept them, are still offered', async ($, on) => {
+    engine(on, { [FILE]: AFTER, '/repo/notes/plan.md': '계획\n' })
+    // The state a session holds across a /reload-plugins from 0.3.1.
+    on('state.get', ($, e, next) =>
+      (e as { key: string }).key === 'opened' ? ({ value: { value: ['/repo/notes/plan.md'], version: 1 } } as never) : next(e),
+    )
+    await editTurn($)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    await ui.press({ key: 'key-1' })
+    expect((await ui.find({ key: 'O0' }))?.text.trim()).toBe('↺ notes/plan.md')
     await ui.unmount()
   })
 

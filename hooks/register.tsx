@@ -40,8 +40,12 @@ const turn = atom({ plugin: 'redpen', key: 'turn' } as const, null as string | n
 const recent = atom({ plugin: 'redpen', key: 'recent' } as const, null as RecentTurn | null)
 const edited = atom({ plugin: 'redpen', key: 'edited' } as const, [] as SessionFile[])
 const snapshot = atom({ plugin: 'redpen', key: 'snapshot' } as const, [] as Held[])
-// Files opened by path, latest first: offered again when a path is typed.
-const opened = atom({ plugin: 'redpen', key: 'opened' } as const, [] as string[])
+// Files opened by path, and when: offered again, with the files changed this session.
+const opened = atom({ plugin: 'redpen', key: 'opened' } as const, [] as SessionFile[])
+// 0.3.1 kept bare paths there, and a session's state outlives a /reload-plugins: such an entry
+// reads as opened at time 0.
+const openedFiles = (list: readonly (SessionFile | string)[]): SessionFile[] =>
+  list.map(f => (typeof f === 'string' ? { path: f, at: 0 } : f))
 const OPENED_MAX = 10
 const OFFERS_MAX = 8
 const view = atom({ plugin: 'redpen', key: 'view' } as const, { screen: 'list' } as View)
@@ -69,10 +73,11 @@ async function record($: Engine, path: string, base: string | null) {
   await update($, edited, list => [...list.filter(f => f.path !== path), { path, at }])
 }
 
-// A file gone from disk leaves the list.
+// A file gone from disk leaves the list and the offers.
 async function forget($: Engine, path: string) {
   await update($, recent, r => (r === null ? r : { ...r, files: r.files.filter(f => f.path !== path) }))
   await update($, edited, list => list.filter(f => f.path !== path))
+  await update($, opened, list => openedFiles(list).filter(f => f.path !== path))
 }
 
 // The files the list knows: those changed this session and those with comments.
@@ -239,31 +244,38 @@ async function openPath($: Engine, typed: string): Promise<string | null> {
   if (stat === undefined) return `${typed} 파일이 없습니다.`
   if (stat.kind !== 'file') return `${typed} 은(는) 파일이 아닙니다.`
   const path = stat.realPath ?? given
-  await update($, opened, list => [path, ...list.filter(p => p !== path)].slice(0, OPENED_MAX))
+  const at = await $.clock.now()
+  await update($, opened, list => [{ path, at }, ...openedFiles(list).filter(f => f.path !== path)].slice(0, OPENED_MAX))
   const changed = (await read($, recent))?.files.find(f => f.path === path)
   await openDoc($, changed ? { kind: 'diff', path, base: changed.base } : { kind: 'file', path })
   return null
 }
 
-// `opened`: a file opened by path before, marked ↺ apart from the directory's entries.
-type Offer = { label: string; open: string; isDir: boolean; opened: boolean }
+// `recent`: a file this session changed or opened by path, marked ↺.
+type Offer = { label: string; open: string; isDir: boolean; recent: boolean }
 
-// What a typed path offers: the opened files whose shown path holds the text, then the entries
-// of the typed directory that complete it, read anew each time so a new file shows at once.
-// A directory's offer fills the input, a file's opens.
+// What a typed path offers. With nothing typed, the files this session changed or opened by
+// path, latest first, those the list shows left out (the recent turn's and those waiting to be
+// sent). Once a path is typed, the entries of its directory that complete it, read anew each
+// time so a new file shows at once. A directory's offer fills the input, a file's opens.
 async function pathOffers($: Engine, typed: string, cwd: string, home: string): Promise<Offer[]> {
-  const needle = typed.toLowerCase()
-  const offers: Offer[] = (await read($, opened))
-    .map(path => ({ label: tilde(relative(path, cwd), home), open: path, isDir: false, opened: true }))
-    .filter(o => o.label.toLowerCase().includes(needle))
   if (typed !== '') {
     const split = splitTyped(typed)
     const entries = await $.fs.list(expand(split.dir, cwd, home)).catch(() => [])
-    for (const c of completions(split, entries, OFFERS_MAX)) {
-      if (!offers.some(o => o.label === c.text)) offers.push({ label: c.text, open: c.text, isDir: c.isDir, opened: false })
-    }
+    return completions(split, entries, OFFERS_MAX).map(c => ({ label: c.text, open: c.text, isDir: c.isDir, recent: false }))
   }
-  return offers.slice(0, OFFERS_MAX)
+  const listed = new Set([
+    ...((await read($, recent))?.files.map(f => f.path) ?? []),
+    ...(await read($, comments)).filter(c => c.kind !== 'reply').map(c => c.path),
+  ])
+  const latest = new Map<string, number>()
+  for (const f of [...(await read($, edited)), ...openedFiles(await read($, opened))]) {
+    if (!listed.has(f.path)) latest.set(f.path, Math.max(latest.get(f.path) ?? 0, f.at))
+  }
+  return [...latest]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, OFFERS_MAX)
+    .map(([path]) => ({ label: tilde(relative(path, cwd), home), open: path, isDir: false, recent: true }))
 }
 
 type PathInput = Extract<View, { screen: 'list' }>['path']
@@ -513,7 +525,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'redpen' }, ($, e) => openReview($, e.args))
 
-  // In the prompt, /redpen <path> completes the path typed: the opened files that hold it and
+  // In the prompt, /redpen <path> completes the path typed: the session's files that hold it and
   // the entries of its directory join the typeahead, a directory's taken to type on in.
   on('prompt.autocomplete', async ($, e, next) => {
     const answered = await next(e)
@@ -655,19 +667,17 @@ export const register: Register = on => {
     }
 
     if (v.screen === 'list') {
-      // Two parts: the files the recent turn changed, each opening as that turn's diff; then
-      // every other file of the session, changed earlier or holding comments alone, latest
-      // first (by its last change, else its last comment), each opening whole.
+      // Two parts: the files the recent turn changed, each opening as that turn's diff; then the
+      // other files with comments, waiting to be sent, latest comment first, each opening whole.
+      // The session's other files are offered by 1, as files to open.
       const changed = (await read($, recent))?.files ?? []
-      const lastChange = new Map((await read($, edited)).map(f => [f.path, f.at]))
       const lastComment = new Map<string, number>()
       for (const c of all) {
         if (c.kind !== 'reply') lastComment.set(c.path, Math.max(lastComment.get(c.path) ?? 0, c.at ?? 0))
       }
-      const when = (path: string) => lastChange.get(path) ?? lastComment.get(path) ?? 0
-      const earlier = [...new Set([...lastChange.keys(), ...lastComment.keys()])]
+      const earlier = [...lastComment.keys()]
         .filter(path => !changed.some(f => f.path === path))
-        .sort((a, b) => when(b) - when(a))
+        .sort((a, b) => lastComment.get(b)! - lastComment.get(a)!)
       const entries: { path: string; source: Source }[] = [
         ...changed.map(f => ({ path: f.path, source: { kind: 'diff', path: f.path, base: f.base } as Source })),
         ...earlier.map(path => ({ path, source: { kind: 'file', path } as Source })),
@@ -702,10 +712,10 @@ export const register: Register = on => {
       // the cursor, the window keeping five entries while the pane's keys show, then the least
       // ↑ and ↓ need, the cursor's entry and one past each end of it.
       type Parts = { header: boolean; gaps: boolean; hint: boolean; keys: boolean }
-      const pathTitle = typing?.error ?? '열 파일 경로 · 빈 Enter 취소'
+      const pathTitle = typing?.error ?? '파일 열기 · 경로 입력 또는 ↓로 선택 · 빈 Enter 취소'
       const pathTitleRows = wrapRows(pathTitle, width).length
       const keyRows = (hint: boolean) =>
-        flowRows([...(hint ? LIST_KEYS.map(hintWidth) : []), cells('1: 경로로 열기'), cells(`0: 전송 (${all.length})`)], 2, width)
+        flowRows([...(hint ? LIST_KEYS.map(hintWidth) : []), cells('1: 파일 열기'), cells(`0: 전송 (${all.length})`)], 2, width)
       const [withHint, withoutHint] = [keyRows(true), keyRows(false)]
       const footerRows = (p: Parts) =>
         typing !== undefined ? pathTitleRows + 1 + (p.keys ? offers.length : 0) : p.hint ? withHint : withoutHint
@@ -754,7 +764,7 @@ export const register: Register = on => {
               {changed.length === 0 && <Text dimColor>  없음.</Text>}
               {changed.map((_, i) => item(i + 1))}
               {earlier.length > 0 && parts.gaps && <Text> </Text>}
-              {earlier.length > 0 && <Text bold>파일 목록</Text>}
+              {earlier.length > 0 && <Text bold>전송 대기</Text>}
               {earlier.map((_, i) => item(changed.length + i + 1))}
             </Box>
           )}
@@ -777,7 +787,7 @@ export const register: Register = on => {
                     plain
                     key={`O${i}`}
                     dimColor
-                    label={cut(`${offer.opened ? '↺' : ' '} ${offer.label}`, Math.max(1, width - 1))}
+                    label={cut(`${offer.recent ? '↺' : ' '} ${offer.label}`, Math.max(1, width - 1))}
                     onPress={() => void pickOffer($, offer)}
                   />
                 ))}
@@ -789,7 +799,7 @@ export const register: Register = on => {
                 plain
                 key="key-1"
                 hotkey="1"
-                label="경로로 열기"
+                label="파일 열기"
                 onPress={() => void (setPath($, { text: '', error: null }).then(() => focus($, 'path-input')))}
               />
               <Button plain key="key-0" hotkey="0" label={`전송 (${all.length})`} onPress={() => void submit($)} />
