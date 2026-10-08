@@ -58,10 +58,16 @@ const PANE = {
 // Sleeps redpen asked for: one per drawing whose Buttons changed, before the ring goes back
 // on ▶. Each test's engine() starts it empty.
 const sleeps: number[] = []
+// The ring's moves under a person's arrow and ▶'s, in the order they reached the engine, and
+// the denials the engine gives the next moves, one each. Each test's engine() starts them empty.
+const moves: string[] = []
+const focusDenials: string[] = []
 
 // The engine beneath the plugin: a file map, a prompt log, and the session's other answers.
 function engine(on: On, files: Record<string, string>) {
   sleeps.length = 0
+  moves.length = 0
+  focusDenials.length = 0
   const submitted: string[] = []
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
@@ -83,7 +89,16 @@ function engine(on: On, files: Record<string, string>) {
   on('clock.now', () => ({ value: Date.UTC(2026, 9, 7, 1, 2) }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.toast', () => ({ value: undefined }))
-  on('ui.focus', () => ({}))
+  on('ui.focus', ($, e) => {
+    if (e.origin.kind === 'person') moves.push(`ring ${e.element}`)
+    const deny = focusDenials.shift()
+    return deny === undefined ? {} : { deny }
+  })
+  on('state.set', ($, e, next) => {
+    const write = e as { key: string; value?: { cursor?: number } }
+    if (write.key === 'view' && write.value?.cursor !== undefined) moves.push(`▶ ${write.value.cursor}`)
+    return next(e)
+  })
   on('clock.sleep', ($, e) => {
     sleeps.push(e.ms)
     return { value: undefined }
@@ -326,6 +341,28 @@ describe('review pane', () => {
     await ui.unmount()
   })
 
+  test('an arrow moves the ring before ▶ follows it, and a denied move leaves ▶ where it was', async ($, on) => {
+    engine(on, { [FILE]: AFTER })
+    await editTurn($)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    await ui.press({ key: 'F0' })
+    const title = async () => (await ui.find({ type: 'Text', text: /src\/foo\.ts · L/ }))?.text
+
+    // The engine moves the ring first; ▶ follows to row 2 after.
+    moves.length = 0
+    await arrow($, 'L2')
+    expect(moves).toEqual(['ring L2', '▶ 2'])
+    expect(await title()).toMatch('L3')
+
+    // A move the engine refuses comes back as it was refused, and ▶ stays on row 2.
+    moves.length = 0
+    focusDenials.push('another move landed first')
+    expect((await arrow($, 'L4')).deny).toBe('another move landed first')
+    expect(moves).toEqual(['ring L4'])
+    expect(await title()).toMatch('L3')
+    await ui.unmount()
+  })
+
   test('a long line and a long comment are split into rows within the pane', async ($, on) => {
     const notes = '/repo/notes.md'
     const long = '상품 검색 응답 시간을 평균 820ms에서 310ms로 줄였습니다. 캐시 적중률은 64%에서 91%로 올랐습니다.'
@@ -532,6 +569,8 @@ describe('review pane', () => {
     await editTurn($)
     const refused = (await $.command.run({ command: 'redpen', args: 'src' } as never)) as { text?: string }
     expect(refused.text).toMatch('파일이 아닙니다')
+    // Claude Code puts "redpen:" before the command's output itself.
+    expect(refused.text).not.toMatch(/^redpen:/)
 
     await $.command.run({ command: 'redpen', args: './src/../src/foo.ts' } as never)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
