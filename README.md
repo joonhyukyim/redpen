@@ -33,11 +33,11 @@ It installs for the user scope; pick another with `-s`.
 
 Each file in the list carries a tag: `new` (created), `edited`, or `commented` (not edited in that turn, listed because it has comments; it opens as the whole file).
 
-The pane takes keyboard focus when it opens. If focus doesn't move to it (the prompt has text in it, a dialog is open, or another pane holds the keys), press `Ctrl+X` `Tab`, or click the pane in the fullscreen terminal. `Esc` returns focus to the prompt.
+The pane takes keyboard focus when it opens. If focus doesn't move to it (the prompt has text in it, a dialog is open, or another pane holds the keys), press `Ctrl+X` `Tab`, or click the pane in the fullscreen terminal. `Esc` returns focus to the prompt, and `Ctrl+X` `Tab` moves it back to the pane. To close the pane, press `Ctrl+X` `X`; `/redpen` opens it again.
 
 ### Hotkeys
 
-The hotkey list is shown at the bottom of the pane (it wraps on narrow panes); while you write a comment, the input takes its place.
+The hotkey list is shown at the bottom of the pane (it wraps on narrow panes); while you write a comment, the input takes its place. Under it, a second line lists the keys for the pane itself, the same on every screen and while you write a comment: `Esc` to the prompt, `Ctrl+X` `Tab` back to the pane, `Ctrl+X` `X` to close the pane. In a document a rule above the hotkeys sets them apart from the lines; a pane too short for the rule and that line leaves both out.
 
 List screen
 
@@ -102,5 +102,7 @@ redpen reads only the files it shows and Claude's last reply, and sends a prompt
 - If a file was edited several times in one turn, the diff shows the whole turn's change.
 - Files over 4 MiB can't be opened. A very large change is shown as one block of deleted lines and one block of added lines.
 - A notebook's diff is its raw `.ipynb` JSON.
+- In a short pane the document drops the comments that lost their place, the rule and the pane's keys, the notes, the header and the hint before it shows fewer than three lines. Under 6 rows it shows only a notice (and the comment input, if one is open); enlarge the window or close the pane with `Ctrl+X` `X`.
+- In a list taller than the pane, the entries show in a window around the one the focus is on, without the blank rows and the `파일 목록` title; then the pane's keys, the header and the hint give way. A hotkey (`1`, `2`–`9`) works only on an entry in the window. Under 5 rows only a notice shows.
 - `Esc` doesn't cancel; it returns focus to the prompt. Cancel a range with `3`, a new comment with an empty Enter.
 - Works in the terminal. Not supported on mobile, the VS Code panel, `claude -p` or WSL. Not tested in the Desktop app.

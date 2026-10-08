@@ -64,7 +64,8 @@ const moves: string[] = []
 const focusDenials: string[] = []
 
 // The engine beneath the plugin: a file map, a prompt log, and the session's other answers.
-function engine(on: On, files: Record<string, string>) {
+// `base` is the file before the turn's Edit.
+function engine(on: On, files: Record<string, string>, base = BEFORE) {
   sleeps.length = 0
   moves.length = 0
   focusDenials.length = 0
@@ -109,12 +110,12 @@ function engine(on: On, files: Record<string, string>) {
     submitted.push(e.text)
     return { text: e.text }
   })
-  on('tool.call', { tool: 'Edit' }, () => ({
+  on('tool.call', { tool: 'Edit' }, ($, e) => ({
     result: {
-      filePath: FILE,
+      filePath: (e as { file_path?: string }).file_path ?? FILE,
       oldString: 'b\n',
       newString: 'b\nhelper()\n',
-      originalFile: BEFORE,
+      originalFile: base,
       structuredPatch: [],
       userModified: false,
       replaceAll: false,
@@ -410,7 +411,150 @@ describe('review pane', () => {
     }
     // Moving 28 times through a window of a few lines shifts it many times, each one re-pinned.
     expect(sleeps.length).toBeGreaterThan(4)
+    // At 60 columns the pane's keys wrap to two rows: with the rule, more than 12 rows leave
+    // the document its five lines, so they give way.
+    expect(await ui.find({ type: 'Text', text: ': Redpen 닫기' })).toBeUndefined()
     await ui.unmount()
+
+    // One row more and they show, counted with the rest.
+    const taller = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...props, scroll: { offset: 0, bodyRows: 13 } } })
+    expect(await taller.find({ type: 'Text', text: ': Redpen 닫기' })).toBeDefined()
+    expect(rowsOf((await taller.drawn()) as El, 60)).toBeLessThanOrEqual(13)
+    await taller.unmount()
+  })
+
+  test("the pane's keys sit under every screen's own, and a short pane leaves them out", async ($, on) => {
+    const notes = '/repo/release-notes.md'
+    engine(on, { [FILE]: AFTER, [notes]: RELEASE_NOTES })
+    await editTurn($)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const paneKeys = async () => (await ui.findAll({ type: 'Text', text: /^: (프롬프트로|Redpen으로|Redpen 닫기)$/ })).length
+
+    // The list, a document, and the comment input, where Esc leaves the comment open.
+    expect(await paneKeys()).toBe(3)
+    expect((await ui.find({ type: 'Text', text: 'Esc' }))?.props.color).toBe('suggestion')
+    // In a document a rule sets the footer apart from the lines above it, the pane's width.
+    const rule = () => ui.find({ type: 'Text', text: /^-+$/ })
+    expect(await rule()).toBeUndefined()
+    await ui.press({ key: 'F0' })
+    expect(await paneKeys()).toBe(3)
+    expect((await rule())?.text).toBe('-'.repeat(PANE.props.bodyColumns))
+    await ui.press({ key: 'L2' })
+    expect(await ui.find({ key: 'comment-input' })).toBeDefined()
+    expect(await paneKeys()).toBe(3)
+    expect(await rule()).toBeDefined()
+    await ui.unmount()
+
+    // 8 rows at 60 columns: the rule and the pane's keys give way, and the tree stays within the pane.
+    await $.command.run({ command: 'redpen', args: notes } as never)
+    const props = { ...PANE.props, placement: 'inline', bodyColumns: 60, scroll: { offset: 0, bodyRows: 8 } } as const
+    const short = await $.ui.mount({ ...PANE, surface: 'terminal', props })
+    expect(await short.find({ type: 'Text', text: ': Redpen 닫기' })).toBeUndefined()
+    expect(await short.find({ type: 'Text', text: /^-+$/ })).toBeUndefined()
+    expect(rowsOf((await short.drawn()) as El, 60)).toBeLessThanOrEqual(8)
+    await short.unmount()
+  })
+
+  test('in a pane as short as 6 rows the parts give way, so ↑ and ↓ still move ▶', async ($, on) => {
+    const notes = '/repo/release-notes.md'
+    engine(on, { [FILE]: AFTER, [notes]: RELEASE_NOTES })
+    await editTurn($)
+    await $.command.run({ command: 'redpen', args: notes } as never)
+    for (const bodyRows of [6, 7, 8, 9]) {
+      const props = { ...PANE.props, placement: 'inline', bodyColumns: 60, scroll: { offset: 0, bodyRows } } as const
+      const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props })
+      for (const i of [9, 10, 11, 10]) {
+        await arrow($, `L${i}`)
+        const tree = (await ui.drawn()) as El
+        // Taller than the pane, the arrows would scroll it; without both neighbours, ↑ or ↓ has nowhere to go.
+        expect(rowsOf(tree, 60)).toBeLessThanOrEqual(bodyRows)
+        expect(textOf(lineOf(tree, `L${i}`)!).startsWith('▶')).toBe(true)
+        expect(await ui.find({ key: `L${i - 1}` })).toBeDefined()
+        expect(await ui.find({ key: `L${i + 1}` })).toBeDefined()
+      }
+      await ui.unmount()
+    }
+  })
+
+  test('in a pane shorter than 6 rows one row says so, and an open comment input stays', async ($, on) => {
+    const notes = '/repo/release-notes.md'
+    engine(on, { [FILE]: AFTER, [notes]: RELEASE_NOTES })
+    await editTurn($)
+    await $.command.run({ command: 'redpen', args: notes } as never)
+    const props = { ...PANE.props, placement: 'inline', bodyColumns: 60, scroll: { offset: 0, bodyRows: 5 } } as const
+    const short = await $.ui.mount({ ...PANE, surface: 'terminal', props })
+    expect(await short.find({ type: 'Text', text: /pane 높이가 부족합니다/ })).toBeDefined()
+    expect(await short.find({ key: 'L0' })).toBeUndefined()
+    expect(rowsOf((await short.drawn()) as El, 60)).toBeLessThanOrEqual(5)
+    await short.unmount()
+
+    // A comment being written when the pane shrinks keeps its input.
+    const tall = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    await tall.press({ key: 'L2' })
+    await tall.unmount()
+    const again = await $.ui.mount({ ...PANE, surface: 'terminal', props })
+    expect(await again.find({ type: 'Text', text: /pane 높이가 부족합니다/ })).toBeDefined()
+    expect(await again.find({ key: 'comment-input' })).toBeDefined()
+    await again.unmount()
+  })
+
+  test('in a tight room a neighbour past folded lines drops its ⋯, so ↓ still reaches it', async ($, on) => {
+    // Changes on lines 2 and 28 of 30: the lines between fold into one gap.
+    const base = Array.from({ length: 30 }, (_, k) => `l${k + 1}`).join('\n') + '\n'
+    const after = base.replace('l2\n', 'L2\n').replace('l28\n', 'L28\n')
+    engine(on, { [FILE]: after }, base)
+    await editTurn($)
+    const rows = diffRows(splitLines(base), splitLines(after), 3)
+    const gap = rows.findIndex(r => r.kind === 'gap')
+    const props = { ...PANE.props, placement: 'inline', bodyColumns: 60, scroll: { offset: 0, bodyRows: 6 } } as const
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props })
+    await ui.press({ key: 'F0' })
+
+    // ▶ on the line above the gap: the line past it is drawn, the ⋯ is not.
+    await arrow($, `L${gap - 1}`)
+    const tree = (await ui.drawn()) as El
+    expect(rowsOf(tree, 60)).toBeLessThanOrEqual(6)
+    expect(await ui.find({ key: `L${gap + 1}` })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /⋯/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('a list taller than the pane shows a window around the cursor, so ↑ and ↓ still move', async ($, on) => {
+    // A turn that edits twelve files: the list holds the reply and twelve entries.
+    const paths = Array.from({ length: 12 }, (_, k) => `/repo/src/f${k}.ts`)
+    engine(on, Object.fromEntries(paths.map(p => [p, AFTER])))
+    await editTurn($, { tool: 'Edit', file_path: paths[0]!, old_string: 'b\n', new_string: 'b\nhelper()\n' })
+    await $.turn.start({ text: 'edit', turnId: 't2' })
+    for (const p of paths) await $.tool.call({ tool: 'Edit', file_path: p, old_string: 'b\n', new_string: 'b\nhelper()\n' })
+    await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+    const keys = ['reply', ...paths.map((_, k) => `F${k}`)]
+
+    // Tall enough, the list shows whole, with its title.
+    const tall = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await tall.find({ type: 'Text', text: '파일 목록' })).toBeDefined()
+    expect(await tall.find({ key: 'F11' })).toBeDefined()
+    await tall.unmount()
+
+    for (const bodyRows of [5, 8, 12]) {
+      const props = { ...PANE.props, placement: 'inline', bodyColumns: 60, scroll: { offset: 0, bodyRows } } as const
+      const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props })
+      for (const k of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 11, 6, 0]) {
+        await arrow($, keys[k]!)
+        // Taller than the pane, the arrows would scroll it; without both neighbours, ↑ or ↓ has nowhere to go.
+        expect(rowsOf((await ui.drawn()) as El, 60)).toBeLessThanOrEqual(bodyRows)
+        expect(await ui.find({ key: keys[k]! })).toBeDefined()
+        if (k > 0) expect(await ui.find({ key: keys[k - 1]! })).toBeDefined()
+        if (k < 12) expect(await ui.find({ key: keys[k + 1]! })).toBeDefined()
+      }
+      await ui.unmount()
+    }
+
+    // Shorter than 5 rows: one row says so.
+    const props = { ...PANE.props, placement: 'inline', bodyColumns: 60, scroll: { offset: 0, bodyRows: 4 } } as const
+    const short = await $.ui.mount({ ...PANE, surface: 'terminal', props })
+    expect(await short.find({ type: 'Text', text: /pane 높이가 부족합니다/ })).toBeDefined()
+    expect(await short.find({ key: 'reply' })).toBeUndefined()
+    await short.unmount()
   })
 
   test('a neighbour line too tall for the room still shows its first row, so ↑ and ↓ reach it', async ($, on) => {
@@ -493,7 +637,8 @@ describe('review pane', () => {
     expect(await ui.find({ type: 'Text', text: '파일 목록' })).toBeDefined()
     expect((await ui.find({ key: 'reply' }))?.props).toMatchObject({ hotkey: '1', autoFocus: true })
     expect((await ui.find({ key: 'F0' }))?.props.hotkey).toBe('2')
-    expect(await ui.find({ type: 'Text', text: /1 마지막 답변 열기 · 2-9 파일 열기/ })).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: '2-9' }))?.props.color).toBe('suggestion')
+    expect(await ui.find({ type: 'Text', text: ': 파일 열기' })).toBeDefined()
 
     // A comment on the reply, sent from the list with 0.
     await ui.press({ key: 'reply' })

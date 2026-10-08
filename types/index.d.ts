@@ -12,7 +12,11 @@ export type Source =
 export type Composing = { editId: string } | { lines: Pick<Comment, 'side' | 'start' | 'end' | 'excerpt'> }
 
 export type View =
-  | { screen: 'list' }
+  | {
+      screen: 'list'
+      /** The entry the focus ring is on: 0 the reply, i + 1 the i-th file. */
+      cursor?: number
+    }
   | {
       screen: 'doc'
       source: Source
