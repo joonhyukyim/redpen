@@ -87,7 +87,9 @@ function engine(on: On, files: Record<string, string>, base = BEFORE) {
     return { deny: 'ENOENT' }
   })
   on('fs.read', ($, e) => (e.path in files ? { value: files[e.path]! } : { deny: 'no such file' }))
-  on('clock.now', () => ({ value: Date.UTC(2026, 9, 7, 1, 2) }))
+  // A minute later at each call, so changes and comments have an order.
+  let now = Date.UTC(2026, 9, 7, 1, 2)
+  on('clock.now', () => ({ value: (now += 60_000) }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.focus', ($, e) => {
@@ -219,7 +221,7 @@ describe('review pane', () => {
       await editTurn($)
 
       const ui = await $.ui.mount({ ...PANE, surface })
-      expect((await ui.find({ key: 'F0' }))?.text).toMatch('src/foo.ts (edited)')
+      expect((await ui.find({ key: 'F0' }))?.text).toMatch('src/foo.ts · 코멘트 0')
       await ui.press({ key: 'F0' })
 
       // rows: a b helper() c d e (all within 3 lines of context); row 2 is the added line
@@ -519,6 +521,68 @@ describe('review pane', () => {
     await ui.unmount()
   })
 
+  test("the list: the recent turn's files as diffs, then the session's other files latest first", async ($, on) => {
+    const [a, b, c, d] = ['/repo/src/a.ts', '/repo/src/b.ts', '/repo/src/c.ts', '/repo/notes/d.md']
+    const files: Record<string, string> = { [a]: AFTER, [b]: AFTER, [c]: AFTER, [d]: 'note\n' }
+    engine(on, files)
+    await $.session.start({ cwd: CWD, surface: 'terminal', isInteractive: true } as never)
+    // A turn that edits `paths`, and runs `during` before it ends, as a Bash call would.
+    const turn = async (turnId: string, paths: string[], during = () => {}, isAborted = false) => {
+      await $.turn.start({ text: 'edit', turnId })
+      for (const p of paths) await $.tool.call({ tool: 'Edit', file_path: p, old_string: 'b\n', new_string: 'b\nhelper()\n' })
+      during()
+      await $.turn.complete({ answer: 'done', durationMs: 1, isAborted, turnId, reason: 'answer' })
+    }
+    const list = async () => {
+      const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+      const labels = (await ui.findAll({ type: 'Button' })).filter(x => /^F\d+$/.test(x.key ?? '')).map(x => x.text)
+      return { ui, labels }
+    }
+    const names = (labels: string[]) => labels.map(l => /(\w+\.\w+) ·/.exec(l)?.[1])
+
+    // t1 edits a; then d gets a comment, without any edit.
+    await turn('t1', [a])
+    await $.command.run({ command: 'redpen', args: d } as never)
+    const first = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    await first.press({ key: 'L0' })
+    await first.input({ key: 'comment-input', text: '확인.' })
+    await first.unmount()
+
+    // t2 edits b and c; t3 edits nothing and leaves the recent turn as it was.
+    await turn('t2', [b, c])
+    await turn('t3', [])
+    await $.command.run({ command: 'redpen', args: '' } as never)
+    let { ui, labels } = await list()
+    expect(names(labels)).toEqual(['b.ts', 'c.ts', 'd.md', 'a.ts'])
+    expect(await ui.find({ type: 'Text', text: '최근 수정' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '파일 목록' })).toBeDefined()
+    // The recent turn's file opens as its diff, an earlier one whole: 2 switches a diff alone.
+    await ui.press({ key: 'F0' })
+    expect(await ui.find({ key: 'key-2' })).toBeDefined()
+    await ui.press({ key: 'key-1' })
+    await ui.press({ key: 'F3' })
+    expect(await ui.find({ key: 'key-2' })).toBeUndefined()
+    await ui.press({ key: 'key-1' })
+    await ui.unmount()
+
+    // t4 changes a with no Edit, as sed would: a, known to the list, is the recent turn's,
+    // its diff from what it held as t4 began.
+    await turn('t4', [], () => (files[a] = AFTER.replace('c\n', 'c2\n')))
+    ;({ ui, labels } = await list())
+    expect(names(labels)).toEqual(['a.ts', 'c.ts', 'b.ts', 'd.md'])
+    await ui.press({ key: 'F0' })
+    expect(await ui.find({ type: 'Text', text: /\+ c2/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /\+ helper\(\)/ })).toBeUndefined()
+    await ui.press({ key: 'key-1' })
+    await ui.unmount()
+
+    // t5 deletes b: it leaves the list. t6, cut short, still makes c's edit the recent turn.
+    await turn('t5', [], () => delete files[b])
+    await turn('t6', [c], () => {}, true)
+    ;({ labels } = await list())
+    expect(names(labels)).toEqual(['c.ts', 'a.ts', 'd.md'])
+  })
+
   test('a list taller than the pane shows a window around the cursor, so ↑ and ↓ still move', async ($, on) => {
     // A turn that edits twelve files: the list holds the reply and twelve entries.
     const paths = Array.from({ length: 12 }, (_, k) => `/repo/src/f${k}.ts`)
@@ -531,7 +595,7 @@ describe('review pane', () => {
 
     // Tall enough, the list shows whole, with its title.
     const tall = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await tall.find({ type: 'Text', text: '파일 목록' })).toBeDefined()
+    expect(await tall.find({ type: 'Text', text: '최근 수정' })).toBeDefined()
     expect(await tall.find({ key: 'F11' })).toBeDefined()
     await tall.unmount()
 
@@ -611,41 +675,44 @@ describe('review pane', () => {
     await ui.unmount()
   })
 
-  test('a long path gives way in the middle, keeping the file name, tag and count', async ($, on) => {
+  test('a long path gives way in the middle, keeping the file name and count', async ($, on) => {
     const long = '/home/Documents/personal/redpen-test-drafts/retry_payment.py'
     engine(on, { [FILE]: AFTER, [long]: 'x\n' })
     await editTurn($)
     await $.command.run({ command: 'redpen', args: long } as never)
-    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 50 } })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 40 } })
     await ui.press({ key: 'L0' })
     await ui.input({ key: 'comment-input', text: '확인.' })
     await ui.press({ key: 'key-1' })
-    // 50 columns leave the path 22 cells after "2: " and the 24-cell tag and count (· counts two);
-    // 59 leave the 31 that ~/Documents/…/retry_payment.py takes.
+    // 40 columns leave the path 27 cells beside the 12-cell count (· counts two) and one spare;
+    // 50 leave the 37 that ~/Documents/…/retry_payment.py fits in, ~/Documents/personal/… not.
     const label = async () => (await ui.find({ type: 'Button', text: /retry_payment\.py/ }))?.props.label
-    expect(await label()).toBe('~/…/retry_payment.py (commented) · 코멘트 1')
-    await ui.redraw({ ...PANE.props, bodyColumns: 59 })
-    expect(await label()).toBe('~/Documents/…/retry_payment.py (commented) · 코멘트 1')
+    expect(await label()).toBe('~/…/retry_payment.py · 코멘트 1')
+    await ui.redraw({ ...PANE.props, bodyColumns: 50 })
+    expect(await label()).toBe('~/Documents/…/retry_payment.py · 코멘트 1')
     await ui.unmount()
   })
 
-  test('the list: reply on 1, files from 2, send on 0; a document goes back on 1', async ($, on) => {
+  test('the list: the reply and files by ↑↓ and Enter, send on 0; a document goes back on 1', async ($, on) => {
     const submitted = engine(on, { [FILE]: AFTER })
     on('session.messages', () => ({ value: [{ role: 'assistant', text: '초안입니다.' }] }) as never)
     await editTurn($)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ type: 'Text', text: '파일 목록' })).toBeDefined()
-    expect((await ui.find({ key: 'reply' }))?.props).toMatchObject({ hotkey: '1', autoFocus: true })
-    expect((await ui.find({ key: 'F0' }))?.props.hotkey).toBe('2')
-    expect((await ui.find({ type: 'Text', text: '2-9' }))?.props.color).toBe('suggestion')
-    expect(await ui.find({ type: 'Text', text: ': 파일 열기' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '최근 수정' })).toBeDefined()
+    // The reply is the first entry, reached by ↑↓ like the files: no number opens it.
+    expect((await ui.find({ key: 'reply' }))?.props).toMatchObject({ autoFocus: true })
+    expect((await ui.find({ key: 'reply' }))?.props.hotkey).toBeUndefined()
+    // Files carry no number: however many there are, ↑↓ and Enter reach each.
+    expect((await ui.find({ key: 'F0' }))?.props.hotkey).toBeUndefined()
+    expect((await ui.find({ type: 'Text', text: '↑↓' }))?.props.color).toBe('suggestion')
+    expect(await ui.find({ type: 'Text', text: ': 열기' })).toBeDefined()
 
     // A comment on the reply, sent from the list with 0.
     await ui.press({ key: 'reply' })
     await ui.press({ key: 'L0' })
     await ui.input({ key: 'comment-input', text: '좋아요.' })
     await ui.press({ key: 'key-1' })
-    expect(await ui.find({ type: 'Text', text: '파일 목록' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '최근 수정' })).toBeDefined()
     await ui.press({ key: 'key-0' })
     expect(submitted[0]).toMatch('1. Claude 마지막 답변 1행\n   > 초안입니다.\n   좋아요.')
     await ui.unmount()
@@ -725,7 +792,7 @@ describe('review pane', () => {
     await ui.input({ key: 'comment-input', text: '확인.' })
     await ui.press({ key: 'key-1' })
     // The comment counts on the edited file's entry; no second entry for another spelling.
-    expect((await ui.find({ key: 'F0' }))?.text).toMatch('src/foo.ts (edited) · 코멘트 1')
+    expect((await ui.find({ key: 'F0' }))?.text).toMatch('src/foo.ts · 코멘트 1')
     expect(await ui.find({ key: 'F1' })).toBeUndefined()
     await ui.unmount()
   })
