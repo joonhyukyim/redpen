@@ -14,9 +14,8 @@ const PANE = 'redpen'
 const REPLY = 'Claude 마지막 답변'
 const EXCERPT_MAX = 8
 // Keys described beside the hotkey Buttons, drawn as a Button draws its own: the key in a
-// theme color, a colon, the text. A theme key, not a fixed color, so it follows the theme.
+// theme color (a theme key, so it follows the theme), a colon, the text.
 type KeyHint = readonly [key: string, text: string]
-const KEY_COLOR = 'suggestion'
 const LIST_KEYS: KeyHint[] = [
   ['↑↓', '이동'],
   ['Enter', '열기'],
@@ -41,8 +40,12 @@ const turn = atom({ plugin: 'redpen', key: 'turn' } as const, null as string | n
 const recent = atom({ plugin: 'redpen', key: 'recent' } as const, null as RecentTurn | null)
 const edited = atom({ plugin: 'redpen', key: 'edited' } as const, [] as SessionFile[])
 const snapshot = atom({ plugin: 'redpen', key: 'snapshot' } as const, [] as Held[])
-// Files opened by path, latest first: offered again when a path is typed.
-const opened = atom({ plugin: 'redpen', key: 'opened' } as const, [] as string[])
+// Files opened by path, and when: offered again, with the files changed this session.
+const opened = atom({ plugin: 'redpen', key: 'opened' } as const, [] as SessionFile[])
+// 0.3.1 kept bare paths there, and a session's state outlives a /reload-plugins: such an entry
+// reads as opened at time 0.
+const openedFiles = (list: readonly (SessionFile | string)[]): SessionFile[] =>
+  list.map(f => (typeof f === 'string' ? { path: f, at: 0 } : f))
 const OPENED_MAX = 10
 const OFFERS_MAX = 8
 const view = atom({ plugin: 'redpen', key: 'view' } as const, { screen: 'list' } as View)
@@ -57,7 +60,10 @@ const statPath = ($: Engine, path: string) => $.fs.stat(path, { resolve: true })
 // before the turn first changed it. The session's list takes the file as changed last.
 async function recordEdit($: Engine, filePath: string, base: string | null) {
   // Kept as /redpen <path> resolves it, so both name a file the same way.
-  const path = (await statPath($, filePath))?.realPath ?? filePath
+  await record($, (await statPath($, filePath))?.realPath ?? filePath, base)
+}
+
+async function record($: Engine, path: string, base: string | null) {
   const turnId = (await read($, turn)) ?? ''
   await update($, recent, r => {
     const files = r?.turnId === turnId ? r.files : []
@@ -67,10 +73,11 @@ async function recordEdit($: Engine, filePath: string, base: string | null) {
   await update($, edited, list => [...list.filter(f => f.path !== path), { path, at }])
 }
 
-// A file gone from disk leaves the list.
+// A file gone from disk leaves the list and the offers.
 async function forget($: Engine, path: string) {
   await update($, recent, r => (r === null ? r : { ...r, files: r.files.filter(f => f.path !== path) }))
   await update($, edited, list => list.filter(f => f.path !== path))
+  await update($, opened, list => openedFiles(list).filter(f => f.path !== path))
 }
 
 // The files the list knows: those changed this session and those with comments.
@@ -237,43 +244,43 @@ async function openPath($: Engine, typed: string): Promise<string | null> {
   if (stat === undefined) return `${typed} 파일이 없습니다.`
   if (stat.kind !== 'file') return `${typed} 은(는) 파일이 아닙니다.`
   const path = stat.realPath ?? given
-  await update($, opened, list => [path, ...list.filter(p => p !== path)].slice(0, OPENED_MAX))
+  const at = await $.clock.now()
+  await update($, opened, list => [{ path, at }, ...openedFiles(list).filter(f => f.path !== path)].slice(0, OPENED_MAX))
   const changed = (await read($, recent))?.files.find(f => f.path === path)
   await openDoc($, changed ? { kind: 'diff', path, base: changed.base } : { kind: 'file', path })
   return null
 }
 
-// `opened`: a file opened by path before, marked ↺ apart from the directory's entries.
-type Offer = { label: string; open: string; isDir: boolean; opened: boolean }
+// `recent`: a file this session changed or opened by path, marked ↺.
+type Offer = { label: string; open: string; isDir: boolean; recent: boolean }
 
-// The entries of a typed path's directory, the last listing kept: every key typed asks again.
-let lastListing: { dir: string; entries: { name: string; kind: 'file' | 'dir' | 'other' }[] } | null = null
-
-// What a typed path offers: the opened files whose shown path holds the text, then the entries
-// of the typed directory that complete it. A directory's offer fills the input, a file's opens.
-async function pathOffers($: Engine, typed: string): Promise<Offer[]> {
-  const cwd = await $.session.cwd()
-  const home = (await $.env.get('HOME')) ?? ''
-  const shown = (path: string) => {
-    const rel = relative(path, cwd)
-    return home !== '' && rel.startsWith(`${home}/`) ? `~${rel.slice(home.length)}` : rel
-  }
-  const needle = typed.toLowerCase()
-  const offers: Offer[] = (await read($, opened))
-    .map(path => ({ label: shown(path), open: path, isDir: false, opened: true }))
-    .filter(o => o.label.toLowerCase().includes(needle))
+// What a typed path offers. With nothing typed, the files this session changed or opened by
+// path, latest first, those the list shows left out (the recent turn's and those waiting to be
+// sent). Once a path is typed, the entries of its directory that complete it, read anew each
+// time so a new file shows at once. A directory's offer fills the input, a file's opens.
+async function pathOffers($: Engine, typed: string, cwd: string, home: string): Promise<Offer[]> {
   if (typed !== '') {
-    const { dir } = splitTyped(typed)
-    const at = dir === '' ? cwd : expand(dir, cwd, home)
-    if (lastListing?.dir !== at) lastListing = { dir: at, entries: await $.fs.list(at).catch(() => []) }
-    for (const c of completions(typed, lastListing.entries, OFFERS_MAX)) {
-      if (!offers.some(o => o.label === c.text)) offers.push({ label: c.text, open: c.text, isDir: c.isDir, opened: false })
-    }
+    const split = splitTyped(typed)
+    const entries = await $.fs.list(expand(split.dir, cwd, home)).catch(() => [])
+    return completions(split, entries, OFFERS_MAX).map(c => ({ label: c.text, open: c.text, isDir: c.isDir, recent: false }))
   }
-  return offers.slice(0, OFFERS_MAX)
+  const listed = new Set([
+    ...((await read($, recent))?.files.map(f => f.path) ?? []),
+    ...(await read($, comments)).filter(c => c.kind !== 'reply').map(c => c.path),
+  ])
+  const latest = new Map<string, number>()
+  for (const f of [...(await read($, edited)), ...openedFiles(await read($, opened))]) {
+    if (!listed.has(f.path)) latest.set(f.path, Math.max(latest.get(f.path) ?? 0, f.at))
+  }
+  return [...latest]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, OFFERS_MAX)
+    .map(([path]) => ({ label: tilde(relative(path, cwd), home), open: path, isDir: false, recent: true }))
 }
 
-async function setPath($: Engine, path: { text: string; error: string | null } | undefined) {
+type PathInput = Extract<View, { screen: 'list' }>['path']
+
+async function setPath($: Engine, path: PathInput) {
   await update($, view, v => (v.screen === 'list' ? { ...v, path } : v))
 }
 
@@ -330,15 +337,13 @@ async function setDoc($: Engine, fn: (v: Doc) => Doc) {
 // drawn in time, another move first); null when the engine could not take the call at all.
 const tryFocus = ($: Engine, key: string) => $.ui.focus({ requestId: PANE, key }).catch(() => null)
 
-// Best effort: the result is not waited for.
 const focus = ($: Engine, key: string) => void tryFocus($, key)
 
 // The pane keeps the ring on a Button by its place among the Buttons drawn, not by its key:
 // when a window gains or loses a Button above the cursor's, the ring lands on a neighbour and
 // no ui.focus is raised. Whenever the drawn Buttons (`ring`, their keys in order) change, put
-// the ring back on `start` once this drawing is on screen. A try that is denied (the element
-// not drawn in time, another move first) gets one more after a fresh drawing, aimed at the
-// cursor as it stands then.
+// the ring back on `start` once this drawing is on screen. A denied try gets one more after a
+// fresh drawing, aimed at the cursor as it stands then.
 function pinRing($: Engine, ring: string, start: string | null, isFocused: boolean) {
   if (ring !== lastRing && isFocused && start !== null) {
     const key = start
@@ -364,8 +369,11 @@ const clock = (at: number) => {
 
 // Fits a path into `width` cells, keeping the file name: the home directory becomes ~,
 // and the directories that do not fit give way to one … from the middle.
+// The home directory as ~.
+const tilde = (path: string, home: string) => (home !== '' && path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path)
+
 function fitPath(path: string, home: string, width: number) {
-  const shown = home !== '' && path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path
+  const shown = tilde(path, home)
   if (cells(shown) <= width) return shown
   const parts = shown.split('/')
   const name = parts.pop()!
@@ -517,12 +525,12 @@ export const register: Register = on => {
 
   on('command.run', { command: 'redpen' }, ($, e) => openReview($, e.args))
 
-  // In the prompt, /redpen <path> completes the path typed: the opened files that hold it and
+  // In the prompt, /redpen <path> completes the path typed: the session's files that hold it and
   // the entries of its directory join the typeahead, a directory's taken to type on in.
   on('prompt.autocomplete', async ($, e, next) => {
     const answered = await next(e)
     if (e.text.slice(0, e.start).trimEnd() !== '/redpen') return answered
-    const offers = await pathOffers($, e.token)
+    const offers = await pathOffers($, e.token, await $.session.cwd(), (await $.env.get('HOME')) ?? '')
     return {
       suggestions: [
         ...answered.suggestions,
@@ -549,15 +557,14 @@ export const register: Register = on => {
       const turnId = await read($, turn)
       const r = await read($, recent)
       const recorded = r !== null && r.turnId === turnId ? r.files.map(f => f.path) : []
-      for (const { path, text } of held) {
-        if ((await statPath($, path)) === undefined) {
-          await forget($, path)
-          continue
+      const now = await Promise.all(held.map(({ path }) => $.fs.read(path).catch(() => null)))
+      for (const [i, { path, text }] of held.entries()) {
+        if (now[i] === null) {
+          if ((await statPath($, path)) === undefined) await forget($, path)
+        } else if (now[i] !== text && !recorded.includes(path)) {
+          // A file the turn's own tools recorded keeps the content before their first change.
+          await record($, path, text)
         }
-        // A file the turn's own tools recorded keeps the content before their first change.
-        if (recorded.includes(path)) continue
-        const now = await $.fs.read(path).catch(() => null)
-        if (now !== null && now !== text) await recordEdit($, path, text)
       }
     }
     return next(e)
@@ -636,7 +643,7 @@ export const register: Register = on => {
     // A described key, as Texts: a Button would join the ring that ↑ and ↓ move along.
     const keyHint = ([key, text]: KeyHint) => (
       <Box>
-        <Text color={KEY_COLOR}>{key}</Text>
+        <Text color="suggestion">{key}</Text>
         <Text>{`: ${text}`}</Text>
       </Box>
     )
@@ -645,85 +652,82 @@ export const register: Register = on => {
         {PANE_KEYS.map(keyHint)}
       </Box>
     )
+    const paneKeysRows = paneKeyRows(width)
+    // Too short to draw a screen in: one row saying so (and what must stay, as an open input).
+    const tooShort = (stays?: JSX.Element) => {
+      lastRing = ''
+      return (
+        <Box flexDirection="column">
+          <Text color="warning" wrap="truncate-end">
+            pane 높이가 부족합니다. 창을 키우거나 Ctrl+X X로 닫으세요.
+          </Text>
+          {stays}
+        </Box>
+      )
+    }
 
     if (v.screen === 'list') {
-      // Two parts: the files the recent turn changed, each opening as that turn's diff; then
-      // every other file of the session, changed earlier or holding comments alone, latest
-      // first (by its last change, else its last comment), each opening whole.
+      // Two parts: the files the recent turn changed, each opening as that turn's diff; then the
+      // other files with comments, waiting to be sent, latest comment first, each opening whole.
+      // The session's other files are offered by 1, as files to open.
       const changed = (await read($, recent))?.files ?? []
-      const lastChange = new Map((await read($, edited)).map(f => [f.path, f.at]))
       const lastComment = new Map<string, number>()
       for (const c of all) {
         if (c.kind !== 'reply') lastComment.set(c.path, Math.max(lastComment.get(c.path) ?? 0, c.at ?? 0))
       }
-      const when = (path: string) => lastChange.get(path) ?? lastComment.get(path) ?? 0
-      const earlier = [...new Set([...lastChange.keys(), ...lastComment.keys()])]
+      const earlier = [...lastComment.keys()]
         .filter(path => !changed.some(f => f.path === path))
-        .sort((a, b) => when(b) - when(a))
+        .sort((a, b) => lastComment.get(b)! - lastComment.get(a)!)
       const entries: { path: string; source: Source }[] = [
         ...changed.map(f => ({ path: f.path, source: { kind: 'diff', path: f.path, base: f.base } as Source })),
         ...earlier.map(path => ({ path, source: { kind: 'file', path } as Source })),
       ]
-      const count = (path: string) => all.filter(c => c.path === path).length
+      const counts = new Map<string, number>()
+      for (const c of all) counts.set(c.path, (counts.get(c.path) ?? 0) + 1)
+      const suffix = (path: string) => ` · 코멘트 ${counts.get(path) ?? 0}`
       const home = (await $.env.get('HOME')) ?? ''
       // The count always shows; the path takes the room left.
-      const entryLabel = (entry: { path: string }) => {
-        const suffix = ` · 코멘트 ${count(entry.path)}`
-        return `${fitPath(relative(entry.path, cwd), home, Math.max(1, width - 1 - cells(suffix)))}${suffix}`
-      }
+      const entryLabel = (path: string) =>
+        `${fitPath(relative(path, cwd), home, Math.max(1, width - 1 - cells(suffix(path))))}${suffix(path)}`
       // The entries the ring moves along, one row each: the reply, then the files.
       const total = 1 + entries.length
       const cursor = Math.max(0, Math.min(v.cursor ?? 0, total - 1))
       const keyOf = (k: number) => (k === 0 ? 'reply' : `F${k - 1}`)
+      const typing = v.path
+      const offers = typing === undefined ? [] : await pathOffers($, typing.text, cwd, home)
       // The ring starts on the cursor's entry, as it starts on the cursor line in a document;
       // on the path input while it is open.
-      const typing = v.path
-      const offers = typing === undefined ? [] : await pathOffers($, typing.text)
-      const item = (k: number) =>
-        k === 0 ? (
-          <Button
-            plain
-            key="reply"
-            autoFocus={(k === cursor && typing === undefined) || undefined}
-            label={cut(`${REPLY} · 코멘트 ${count(REPLY)}`, Math.max(1, width - 3))}
-            onPress={() => openReply($)}
-          />
-        ) : (
-          <Button
-            plain
-            key={`F${k - 1}`}
-            autoFocus={(k === cursor && typing === undefined) || undefined}
-            label={entryLabel(entries[k - 1]!)}
-            onPress={() => openDoc($, entries[k - 1]!.source)}
-          />
-        )
+      const item = (k: number) => (
+        <Button
+          plain
+          key={keyOf(k)}
+          autoFocus={(k === cursor && typing === undefined) || undefined}
+          label={k === 0 ? cut(`${REPLY}${suffix(REPLY)}`, Math.max(1, width - 1)) : entryLabel(entries[k - 1]!.path)}
+          onPress={() => (k === 0 ? openReply($) : openDoc($, entries[k - 1]!.source))}
+        />
+      )
 
       // As in a document, the tree must never be taller than the pane, or the arrows scroll it.
-      // While every entry fits, the list shows whole, the blank rows giving way first. Past
-      // that the entries show in a window around the cursor, without the blank rows and the
-      // titles, and the rest give way in order: the pane's keys and the path input's offers,
-      // the header, the keys' hint. The window keeps five entries' room while the pane's keys
-      // show; then the cursor's entry and one past each end of it, the least ↑ and ↓ need.
+      // The plans below, tried in order: the list whole, then its entries in a window around
+      // the cursor, the window keeping five entries while the pane's keys show, then the least
+      // ↑ and ↓ need, the cursor's entry and one past each end of it.
       type Parts = { header: boolean; gaps: boolean; hint: boolean; keys: boolean }
-      const pathTitle = typing?.error ?? '열 파일 경로 · 빈 Enter 취소'
-      // The footer: the hotkeys, or while it is open the path input, its title and its offers.
+      const pathTitle = typing?.error ?? '파일 열기 · 경로 입력 또는 ↓로 선택 · 빈 Enter 취소'
+      const pathTitleRows = wrapRows(pathTitle, width).length
+      const keyRows = (hint: boolean) =>
+        flowRows([...(hint ? LIST_KEYS.map(hintWidth) : []), cells('1: 파일 열기'), cells(`0: 전송 (${all.length})`)], 2, width)
+      const [withHint, withoutHint] = [keyRows(true), keyRows(false)]
       const footerRows = (p: Parts) =>
-        typing !== undefined
-          ? wrapRows(pathTitle, width).length + 1 + (p.keys ? offers.length : 0)
-          : flowRows(
-              [...(p.hint ? LIST_KEYS.map(hintWidth) : []), cells('1: 경로로 열기'), cells(`0: 전송 (${all.length})`)],
-              2,
-              width,
-            )
+        typing !== undefined ? pathTitleRows + 1 + (p.keys ? offers.length : 0) : p.hint ? withHint : withoutHint
       // Each part's title, the first's note when it is empty; a blank row before the second.
       const titleRows = (changed.length === 0 ? 2 : 1) + (earlier.length > 0 ? 1 : 0)
       const gapRows = earlier.length > 0 ? 4 : 3
       const chrome = (p: Parts, windowed: boolean) =>
         (p.header ? 1 : 0) +
-        (p.gaps && !windowed ? gapRows : 0) +
+        (p.gaps ? gapRows : 0) +
         (windowed ? 0 : titleRows) +
         footerRows(p) +
-        (p.keys ? paneKeyRows(width) : 0)
+        (p.keys ? paneKeysRows : 0)
       const every: Parts = { header: true, gaps: true, hint: true, keys: true }
       const bare: Parts = { ...every, gaps: false }
       const least = Math.min(3, total)
@@ -737,14 +741,7 @@ export const register: Register = on => {
       ]
       // One spare row in case the footer wraps one row more than counted.
       const plan = plans.find(([p, windowed, need]) => bodyRows - chrome(p, windowed) - 1 >= need)
-      if (plan === undefined) {
-        lastRing = ''
-        return (
-          <Text color="warning" wrap="truncate-end">
-            pane 높이가 부족합니다. 창을 키우거나 Ctrl+X X로 닫으세요.
-          </Text>
-        )
-      }
+      if (plan === undefined) return tooShort()
       const [parts, windowed] = plan
       // The window: as many entries as the room holds, the cursor's away from its ends.
       const room = windowed ? Math.min(total, bodyRows - chrome(parts, true) - 1) : total
@@ -764,10 +761,10 @@ export const register: Register = on => {
               {item(0)}
               {parts.gaps && <Text> </Text>}
               <Text bold>최근 수정</Text>
-              {changed.length === 0 && <Text dimColor>  없음. /redpen &lt;path&gt; 로 임의 파일을 열 수 있습니다.</Text>}
+              {changed.length === 0 && <Text dimColor>  없음.</Text>}
               {changed.map((_, i) => item(i + 1))}
               {earlier.length > 0 && parts.gaps && <Text> </Text>}
-              {earlier.length > 0 && <Text bold>파일 목록</Text>}
+              {earlier.length > 0 && <Text bold>전송 대기</Text>}
               {earlier.map((_, i) => item(changed.length + i + 1))}
             </Box>
           )}
@@ -790,7 +787,7 @@ export const register: Register = on => {
                     plain
                     key={`O${i}`}
                     dimColor
-                    label={cut(`${offer.opened ? '↺' : ' '} ${offer.label}`, Math.max(1, width - 1))}
+                    label={cut(`${offer.recent ? '↺' : ' '} ${offer.label}`, Math.max(1, width - 1))}
                     onPress={() => void pickOffer($, offer)}
                   />
                 ))}
@@ -802,7 +799,7 @@ export const register: Register = on => {
                 plain
                 key="key-1"
                 hotkey="1"
-                label="경로로 열기"
+                label="파일 열기"
                 onPress={() => void (setPath($, { text: '', error: null }).then(() => focus($, 'path-input')))}
               />
               <Button plain key="key-0" hotkey="0" label={`전송 (${all.length})`} onPress={() => void submit($)} />
@@ -849,8 +846,9 @@ export const register: Register = on => {
       ]
     }
 
-    // The footer, with or without the hint before the hotkeys, and the rows it takes.
-    let footerFor: (hint: boolean) => { el: JSX.Element; rows: number }
+    // The footer, with or without the hint before the hotkeys, and the rows each takes.
+    let footer: (hint: boolean) => JSX.Element
+    let footerRows: (hint: boolean) => number
     const rangeText = lineSpan(range)
     if (v.composing !== null) {
       const composing = v.composing
@@ -860,23 +858,22 @@ export const register: Register = on => {
       const composeTitle = editing
         ? '코멘트 수정 · 모두 지우고 Enter 삭제'
         : `코멘트 ${target.side === 'old' ? '(삭제된 줄) ' : ''}L${lineSpan(target)} · 빈 Enter 취소`
-      const input = {
-        el: (
-          <Box flexDirection="column">
-            <Text>{composeTitle}</Text>
-            <Input
-              key="comment-input"
-              placeholder="코멘트 입력 후 Enter"
-              value={editing?.text ?? ''}
-              submitLabel="저장"
-              autoFocus
-              onSubmit={value => save($, value)}
-            />
-          </Box>
-        ),
-        rows: wrapRows(composeTitle, width).length + 1,
-      }
-      footerFor = () => input
+      const input = (
+        <Box flexDirection="column">
+          <Text>{composeTitle}</Text>
+          <Input
+            key="comment-input"
+            placeholder="코멘트 입력 후 Enter"
+            value={editing?.text ?? ''}
+            submitLabel="저장"
+            autoFocus
+            onSubmit={value => save($, value)}
+          />
+        </Box>
+      )
+      const inputRows = wrapRows(composeTitle, width).length + 1
+      footer = () => input
+      footerRows = () => inputRows
     } else {
       // Digits, which the Korean input method passes through as typed. Moving and
       // commenting take ↑↓ and Enter.
@@ -889,17 +886,19 @@ export const register: Register = on => {
         ['0', `전송 (${all.length})`, () => submit($)],
       ]
       const keyWidths = keys.map(([hotkey, label]) => cells(`${hotkey}: ${label}`))
-      footerFor = hint => ({
-        el: (
-          <Box flexWrap="wrap" columnGap={2}>
-            {hint && DOC_KEYS.map(keyHint)}
-            {keys.map(([hotkey, label, run]) => (
-              <Button plain key={`key-${hotkey}`} hotkey={hotkey} label={label} onPress={() => void run()} />
-            ))}
-          </Box>
-        ),
-        rows: flowRows([...(hint ? DOC_KEYS.map(hintWidth) : []), ...keyWidths], 2, width),
-      })
+      const [withHint, withoutHint] = [
+        flowRows([...DOC_KEYS.map(hintWidth), ...keyWidths], 2, width),
+        flowRows(keyWidths, 2, width),
+      ]
+      footer = hint => (
+        <Box flexWrap="wrap" columnGap={2}>
+          {hint && DOC_KEYS.map(keyHint)}
+          {keys.map(([hotkey, label, run]) => (
+            <Button plain key={`key-${hotkey}`} hotkey={hotkey} label={label} onPress={() => void run()} />
+          ))}
+        </Box>
+      )
+      footerRows = hint => (hint ? withHint : withoutHint)
     }
 
     const lineNo = (r: Row) => (r.kind === 'gap' ? '' : String(r.newLine ?? r.oldLine))
@@ -910,21 +909,22 @@ export const register: Register = on => {
     const noteRows = (doc.note ? wrapRows(doc.note, width).length : 0) + (away.length > 0 ? 1 : 0)
     const awayLines = away.slice(0, 5).flatMap(({ c, why }) => commentLines(c, '  ', '?', `${why} · `))
     // The tree must never be taller than the pane: past it the arrows scroll the pane instead
-    // of moving the ring, and the ring leaves ▶ behind. The parts besides the lines and the
-    // title, and the order they give way in when the pane is short: the comments that lost
-    // their place, the rule and the pane's keys, the notes, the header, the footer's hint.
-    // The first two keep five lines' room; the rest the ▶ line and one past each end of it,
-    // the least ↑ and ↓ need to move.
+    // of moving the ring, and the ring leaves ▶ behind. The plans below, tried in order, give
+    // way part by part; the first two keep five lines' room, the rest the ▶ line and one past
+    // each end of it, the least ↑ and ↓ need to move.
     type Parts = { away: boolean; keys: boolean; notes: boolean; header: boolean; hint: boolean }
     const chrome = (p: Parts) =>
       (p.header ? 1 : 0) +
       1 +
       (p.notes ? noteRows : 0) +
       (p.away ? awayLines.length : 0) +
-      footerFor(p.hint).rows +
-      (p.keys ? 1 + paneKeyRows(width) : 0)
+      footerRows(p.hint) +
+      (p.keys ? 1 + paneKeysRows : 0)
     const every: Parts = { away: true, keys: true, notes: true, header: true, hint: true }
-    const least = Math.min(3, Math.max(1, rows.filter(isLine).length))
+    // Up to three lines are needed; counting stops at the third, whatever the file's length.
+    let least = 0
+    for (const r of rows) if (isLine(r) && ++least === 3) break
+    least = Math.max(1, least)
     const plans: [Parts, number][] = [
       [every, 5],
       [{ ...every, away: false }, 5],
@@ -935,19 +935,8 @@ export const register: Register = on => {
     ]
     // One spare row in case the footer wraps one row more than counted.
     const parts = plans.find(([p, need]) => bodyRows - chrome(p) - 1 >= need)?.[0]
-    if (parts === undefined) {
-      // Too short for even that: one row saying so, and the comment input if one is open, so
-      // a comment being written stays. Nothing to scroll, and no ring to put back.
-      lastRing = ''
-      return (
-        <Box flexDirection="column">
-          <Text color="warning" wrap="truncate-end">
-            pane 높이가 부족합니다. 창을 키우거나 Ctrl+X X로 닫으세요.
-          </Text>
-          {v.composing !== null && footerFor(false).el}
-        </Box>
-      )
-    }
+    // A comment being written stays, its input under the notice.
+    if (parts === undefined) return tooShort(v.composing !== null ? footer(false) : undefined)
     const room = Math.max(1, bodyRows - chrome(parts) - 1)
     // Line i's text after "▶", the number and " + ", split to the pane's width; each line
     // is split once per drawing, however often the window and the blocks ask for it.
@@ -1083,7 +1072,7 @@ export const register: Register = on => {
             {'-'.repeat(width)}
           </Text>
         )}
-        {footerFor(parts.hint).el}
+        {footer(parts.hint)}
         {parts.keys && paneKeys}
       </Box>
     )

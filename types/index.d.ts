@@ -62,7 +62,7 @@ declare module 'claude-code' {
       recent: RecentTurn | null
       edited: SessionFile[]
       snapshot: Held[]
-      opened: string[]
+      opened: SessionFile[]
       view: View
       comments: Comment[]
       sent: Sent | null
