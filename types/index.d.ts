@@ -25,6 +25,8 @@ export type View =
       screen: 'list'
       /** The entry the focus ring is on: 0 the reply, i + 1 the i-th file. */
       cursor?: number
+      /** The path input, while open: the text typed, and why the last Enter opened nothing. */
+      path?: { text: string; error: string | null }
     }
   | {
       screen: 'doc'
@@ -60,6 +62,7 @@ declare module 'claude-code' {
       recent: RecentTurn | null
       edited: SessionFile[]
       snapshot: Held[]
+      opened: string[]
       view: View
       comments: Comment[]
       sent: Sent | null
