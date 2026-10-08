@@ -1,0 +1,13 @@
+{
+  "name": "redpen",
+  "description": "redpen: line-by-line review pane for Claude Code",
+  "owner": {
+    "name": "joonhyuk"
+  },
+  "plugins": [
+    {
+      "name": "redpen",
+      "source": "./"
+    }
+  ]
+}
