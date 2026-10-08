@@ -17,8 +17,7 @@ export type Entry = { name: string; kind: 'file' | 'dir' | 'other' }
 // The entries of the typed directory that complete the typed name, as the typed path would
 // read with them: directories first, then by name, each directory ending in /. A hidden entry
 // shows only once its leading dot is typed.
-export function completions(typed: string, entries: Entry[], max: number) {
-  const { dir, stem } = splitTyped(typed)
+export function completions({ dir, stem }: ReturnType<typeof splitTyped>, entries: Entry[], max: number) {
   return entries
     .filter(e => e.name.startsWith(stem) && (stem.startsWith('.') || !e.name.startsWith('.')))
     .sort((a, b) => Number(b.kind === 'dir') - Number(a.kind === 'dir') || a.name.localeCompare(b.name))

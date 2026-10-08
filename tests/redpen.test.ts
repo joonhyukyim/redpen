@@ -592,13 +592,15 @@ describe('review pane', () => {
     // t5 deletes b: it leaves the list. t6, cut short, still makes c's edit the recent turn.
     await turn('t5', [], () => delete files[b])
     await turn('t6', [c], () => {}, true)
-    ;({ labels } = await list())
+    ;({ ui, labels } = await list())
     expect(names(labels)).toEqual(['c.ts', 'a.ts', 'd.md'])
+    await ui.unmount()
   })
 
   test('1 opens a path input: it offers the opened files and the directory, and opens what Enter names', async ($, on) => {
     const notes = '/repo/notes/plan.md'
-    engine(on, { [FILE]: AFTER, '/repo/src/fob.ts': 'x\n', [notes]: '계획\n' })
+    const files: Record<string, string> = { [FILE]: AFTER, '/repo/src/fob.ts': 'x\n', [notes]: '계획\n' }
+    engine(on, files)
     await editTurn($)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     const offers = async () => (await ui.findAll({ type: 'Button' })).filter(x => /^O\d+$/.test(x.key ?? '')).map(x => x.text.trim())
@@ -624,6 +626,10 @@ describe('review pane', () => {
     expect((await ui.find({ key: 'path-input' }))?.props.value).toBe('src/')
     await ui.input({ key: 'path-input', text: 'src/fo', kind: 'change' })
     expect(await offers()).toEqual(['src/fob.ts', 'src/foo.ts'])
+    // A file made while the input is open is offered at the next key.
+    files['/repo/src/fox.ts'] = 'y\n'
+    await ui.input({ key: 'path-input', text: 'src/fo', kind: 'change' })
+    expect(await offers()).toEqual(['src/fob.ts', 'src/foo.ts', 'src/fox.ts'])
     await ui.press({ key: 'O1' })
     // The recent turn changed foo.ts: it opens as that diff, where 2 switches to the whole file.
     expect(await ui.find({ key: 'key-2' })).toBeDefined()
@@ -640,7 +646,7 @@ describe('review pane', () => {
     expect(await offers()).toEqual(['↺ notes/plan.md'])
     // Every offer is drawn dim; a file opened before is marked ↺, an entry of the directory not.
     await ui.input({ key: 'path-input', text: 'src/f', kind: 'change' })
-    expect(await offers()).toEqual(['↺ src/foo.ts', 'src/fob.ts'])
+    expect(await offers()).toEqual(['↺ src/foo.ts', 'src/fob.ts', 'src/fox.ts'])
     expect((await ui.find({ key: 'O0' }))?.props.dimColor).toBe(true)
     expect((await ui.find({ key: 'O1' }))?.props.dimColor).toBe(true)
     await ui.unmount()
@@ -776,10 +782,10 @@ describe('review pane', () => {
     await editTurn($)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await ui.find({ type: 'Text', text: '최근 수정' })).toBeDefined()
-    // The reply is the first entry, reached by ↑↓ like the files: no number opens it.
+    // The reply is the first entry and the ring starts on it; ↑↓ and Enter reach every entry,
+    // none of which has a hotkey.
     expect((await ui.find({ key: 'reply' }))?.props).toMatchObject({ autoFocus: true })
     expect((await ui.find({ key: 'reply' }))?.props.hotkey).toBeUndefined()
-    // Files carry no number: however many there are, ↑↓ and Enter reach each.
     expect((await ui.find({ key: 'F0' }))?.props.hotkey).toBeUndefined()
     expect((await ui.find({ type: 'Text', text: '↑↓' }))?.props.color).toBe('suggestion')
     expect(await ui.find({ type: 'Text', text: ': 열기' })).toBeDefined()

@@ -37,7 +37,7 @@ The pane takes keyboard focus when it opens. If focus doesn't move to it (the pr
 
 ### Hotkeys
 
-The hotkey list is shown at the bottom of the pane (it wraps on narrow panes); while you write a comment, the input takes its place. Under it, a second line lists the keys for the pane itself, the same on every screen and while you write a comment: `Esc` to the prompt, `Ctrl+X` `Tab` back to the pane, `Ctrl+X` `X` to close the pane. In a document a rule above the hotkeys sets them apart from the lines; a pane too short for the rule and that line leaves both out.
+The hotkey list is shown at the bottom of the pane (it wraps on narrow panes); while you write a comment, the input takes its place. Under it, a second line shows the pane keys described above, on every screen and while you write a comment. In a document a rule above the hotkeys sets them apart from the lines; a pane too short for the rule and that line leaves both out.
 
 List screen
 
@@ -47,7 +47,7 @@ List screen
 | `1`     | Open a file by path (see below) |
 | `0`     | Send all comments |
 
-`1` opens a path input in place of the hotkeys. Type a path as for `/redpen <path>` and press Enter; an empty Enter closes it, and a path that isn't a file keeps it open with the reason. Under it are offers for what you typed: files you opened by path this session (up to 10, latest first, marked `↺`), then the entries of the typed directory that complete it, all drawn dim. Move to one with ↓ and press Enter: a directory fills the input, a file opens.
+`1` opens a path input in place of the hotkeys. Type a path as for `/redpen <path>` and press Enter; an empty Enter closes it, and a path that isn't a file keeps it open with the reason. Under it are up to 8 offers for what you typed, drawn dim: files you opened by path this session (latest first, marked `↺`), then the entries of the typed directory that complete it. Move to one with ↓ and press Enter: a directory fills the input, a file opens.
 
 Document screen
 
@@ -101,7 +101,7 @@ redpen reads the files in its list (at the start and end of each turn, and when 
 ## Limitations
 
 - Files Claude changes with Edit, Write or NotebookEdit are listed. A file already in the list is also listed when it changes any other way (Bash, an MCP tool, a subagent), once the turn ends. Any other file isn't; open it with `/redpen <path>`.
-- A file deleted during a turn leaves the list.
+- A file deleted during a turn leaves the list, unless it has comments.
 - If a file was edited several times in one turn, the diff shows the whole turn's change.
 - Files over 4 MiB can't be opened. A very large change is shown as one block of deleted lines and one block of added lines.
 - A notebook's diff is its raw `.ipynb` JSON.
