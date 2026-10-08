@@ -12,7 +12,25 @@ type Doc = Extract<View, { screen: 'doc' }>
 const PANE = 'redpen'
 const REPLY = 'Claude 마지막 답변'
 const EXCERPT_MAX = 8
-const HINT = '↑↓ 이동 · Enter 코멘트 작성/수정'
+// Keys described beside the hotkey Buttons, drawn as a Button draws its own: the key in a
+// theme color, a colon, the text. A theme key, not a fixed color, so it follows the theme.
+type KeyHint = readonly [key: string, text: string]
+const KEY_COLOR = 'suggestion'
+const LIST_KEYS: KeyHint[] = [
+  ['1', '마지막 답변 열기'],
+  ['2-9', '파일 열기'],
+]
+const DOC_KEYS: KeyHint[] = [
+  ['↑↓', '이동'],
+  ['Enter', '코멘트 작성/수정'],
+]
+// Claude Code's keys for the pane itself, the same on every screen, under each screen's own.
+const PANE_KEYS: KeyHint[] = [
+  ['Esc', '프롬프트로'],
+  ['Ctrl+X Tab', 'Redpen으로'],
+  ['Ctrl+X X', 'Redpen 닫기'],
+]
+const hintWidth = ([key, text]: KeyHint) => cells(`${key}: ${text}`)
 const HEADER = '다음 리뷰 코멘트를 모두 반영해서 수정해줘. 코멘트가 지적한 부분 외에는 건드리지 마.'
 
 const pending = atom({ plugin: 'redpen', key: 'pending' } as const, [] as TurnFile[])
@@ -175,8 +193,8 @@ async function openReply($: Engine) {
   else await openDoc($, { kind: 'reply', text })
 }
 
-// The Buttons the document drew last, in order, and whether the next try at putting the ring
-// back on ▶ is the one retry a denied try gets. See where the window is drawn.
+// The Buttons the pane drew last, in order, and whether the next try at putting the ring
+// back is the one retry a denied try gets. See pinRing.
 let lastRing = ''
 let retrying = false
 
@@ -226,6 +244,30 @@ const tryFocus = ($: Engine, key: string) => $.ui.focus({ requestId: PANE, key }
 // Best effort: the result is not waited for.
 const focus = ($: Engine, key: string) => void tryFocus($, key)
 
+// The pane keeps the ring on a Button by its place among the Buttons drawn, not by its key:
+// when a window gains or loses a Button above the cursor's, the ring lands on a neighbour and
+// no ui.focus is raised. Whenever the drawn Buttons (`ring`, their keys in order) change, put
+// the ring back on `start` once this drawing is on screen. A try that is denied (the element
+// not drawn in time, another move first) gets one more after a fresh drawing, aimed at the
+// cursor as it stands then.
+function pinRing($: Engine, ring: string, start: string | null, isFocused: boolean) {
+  if (ring !== lastRing && isFocused && start !== null) {
+    const key = start
+    const retry = retrying
+    retrying = false
+    void $.clock
+      .sleep(0)
+      .then(() => tryFocus($, key))
+      .then(result => {
+        if (result?.deny === undefined || retry) return
+        retrying = true
+        lastRing = ''
+        $.ui.invalidate('ui.render')
+      })
+  }
+  lastRing = ring
+}
+
 const clock = (at: number) => {
   const d = new Date(at)
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
@@ -261,6 +303,9 @@ function flowRows(widths: number[], gap: number, width: number) {
   }
   return rows
 }
+
+// Rows the pane's keys take at `width` columns, laid out as the hotkeys are.
+const paneKeyRows = (width: number) => flowRows(PANE_KEYS.map(hintWidth), 2, width)
 
 function layout(v: Doc, all: Comment[], doc: Loaded) {
   const { rows, lines } = doc
@@ -428,6 +473,10 @@ export const register: Register = on => {
     const line = /^L(\d+)$/.exec(e.element ?? '')
     const comment = /^C(.+)$/.exec(e.element ?? '')
     if (line) await setDoc($, v => ({ ...v, cursor: Number(line[1]), focused: null }))
+    // The list keeps its own cursor, so its window can follow the ring.
+    const file = /^F(\d+)$/.exec(e.element ?? '')
+    const entry = e.element === 'reply' ? 0 : file ? Number(file[1]) + 1 : null
+    if (entry !== null) await update($, view, v => (v.screen === 'list' ? { ...v, cursor: entry } : v))
     if (comment) {
       const v = await read($, view)
       if (v.screen === 'doc') {
@@ -447,6 +496,7 @@ export const register: Register = on => {
     }
     const { Box, Text, Button, Input } = $.ui.resolve(e)
     const width = e.props.bodyColumns
+    const bodyRows = e.props.scroll.bodyRows
     const v = await read($, view)
     const all = await read($, comments)
     const last = await read($, sent)
@@ -455,8 +505,20 @@ export const register: Register = on => {
     // The prompt sent is in the conversation; the header only says when, and how many.
     const header = (
       <Text bold wrap="truncate-end">
-        redpen · 코멘트 {all.length}개{last ? ` · 마지막 전송 ${clock(last.at)} (${last.count}개)` : ''}
+        Redpen · 코멘트 {all.length}개{last ? ` · 마지막 전송 ${clock(last.at)} (${last.count}개)` : ''}
       </Text>
+    )
+    // A described key, as Texts: a Button would join the ring that ↑ and ↓ move along.
+    const keyHint = ([key, text]: KeyHint) => (
+      <Box>
+        <Text color={KEY_COLOR}>{key}</Text>
+        <Text>{`: ${text}`}</Text>
+      </Box>
+    )
+    const paneKeys = (
+      <Box flexWrap="wrap" columnGap={2}>
+        {PANE_KEYS.map(keyHint)}
+      </Box>
     )
 
     if (v.screen === 'list') {
@@ -479,37 +541,97 @@ export const register: Register = on => {
         const suffix = ` (${entry.tag}) · 코멘트 ${count(entry.path)}`
         return `${fitPath(relative(entry.path, cwd), home, Math.max(1, width - 4 - cells(suffix)))}${suffix}`
       }
-      return (
-        <Box flexDirection="column">
-          {header}
-          <Text> </Text>
-          {/* The reply is always 1 and the ring starts on it, as it starts on the cursor line in a document. */}
+      // The entries the ring moves along, one row each: the reply (always 1), then the files.
+      const total = 1 + entries.length
+      const cursor = Math.max(0, Math.min(v.cursor ?? 0, total - 1))
+      const keyOf = (k: number) => (k === 0 ? 'reply' : `F${k - 1}`)
+      // The ring starts on the cursor's entry, as it starts on the cursor line in a document.
+      const item = (k: number) =>
+        k === 0 ? (
           <Button
             plain
             key="reply"
-            autoFocus
+            autoFocus={k === cursor || undefined}
             hotkey="1"
-            label={`${REPLY} · 코멘트 ${count(REPLY)}`}
+            label={cut(`${REPLY} · 코멘트 ${count(REPLY)}`, Math.max(1, width - 3))}
             onPress={() => openReply($)}
           />
-          <Text> </Text>
-          <Text bold>파일 목록</Text>
-          {changed.length === 0 && <Text dimColor>  없음. /redpen &lt;path&gt; 로 임의 파일을 열 수 있습니다.</Text>}
-          {entries.map((entry, i) => (
-            <Button
-              plain
-              key={`F${i}`}
-              hotkey={i < 8 ? String(i + 2) : undefined}
-              label={entryLabel(entry)}
-              onPress={() => openDoc($, entry.source)}
-            />
-          ))}
-          <Text> </Text>
+        ) : (
+          <Button
+            plain
+            key={`F${k - 1}`}
+            autoFocus={k === cursor || undefined}
+            hotkey={k < 9 ? String(k + 1) : undefined}
+            label={entryLabel(entries[k - 1]!)}
+            onPress={() => openDoc($, entries[k - 1]!.source)}
+          />
+        )
+
+      // As in a document, the tree must never be taller than the pane, or the arrows scroll it.
+      // While every entry fits, the list shows whole, the blank rows giving way first. Past
+      // that the entries show in a window around the cursor, without the blank rows and the
+      // title, and the rest give way in order: the pane's keys, the header, the keys' hint.
+      // The window keeps five entries' room while the pane's keys show; then the cursor's entry
+      // and one past each end of it, the least ↑ and ↓ need to move.
+      type Parts = { header: boolean; gaps: boolean; hint: boolean; keys: boolean }
+      const footerRows = (hint: boolean) =>
+        flowRows([...(hint ? LIST_KEYS.map(hintWidth) : []), cells(`0: 전송 (${all.length})`)], 2, width)
+      const titleRows = changed.length === 0 ? 2 : 1
+      const chrome = (p: Parts, windowed: boolean) =>
+        (p.header ? 1 : 0) +
+        (p.gaps ? 3 : 0) +
+        (windowed ? 0 : titleRows) +
+        footerRows(p.hint) +
+        (p.keys ? paneKeyRows(width) : 0)
+      const every: Parts = { header: true, gaps: true, hint: true, keys: true }
+      const bare: Parts = { ...every, gaps: false }
+      const least = Math.min(3, total)
+      const plans: [Parts, boolean, number][] = [
+        [every, false, total],
+        [bare, false, total],
+        [bare, true, Math.min(5, total)],
+        [{ ...bare, keys: false }, true, least],
+        [{ ...bare, keys: false, header: false }, true, least],
+        [{ header: false, gaps: false, hint: false, keys: false }, true, least],
+      ]
+      // One spare row in case the footer wraps one row more than counted.
+      const plan = plans.find(([p, windowed, need]) => bodyRows - chrome(p, windowed) - 1 >= need)
+      if (plan === undefined) {
+        lastRing = ''
+        return (
+          <Text color="warning" wrap="truncate-end">
+            pane 높이가 부족합니다. 창을 키우거나 Ctrl+X X로 닫으세요.
+          </Text>
+        )
+      }
+      const [parts, windowed] = plan
+      // The window: as many entries as the room holds, the cursor's away from its ends.
+      const room = windowed ? Math.min(total, bodyRows - chrome(parts, true) - 1) : total
+      const top = Math.max(0, Math.min(cursor - Math.floor((room - 1) / 2), total - room))
+      const shown = Array.from({ length: room }, (_, k) => top + k)
+      pinRing($, shown.map(keyOf).join(' '), keyOf(cursor), e.props.isFocused)
+
+      return (
+        <Box flexDirection="column">
+          {parts.header && header}
+          {parts.gaps && <Text> </Text>}
+          {windowed ? (
+            shown.map(item)
+          ) : (
+            <Box flexDirection="column">
+              {item(0)}
+              {parts.gaps && <Text> </Text>}
+              <Text bold>파일 목록</Text>
+              {changed.length === 0 && <Text dimColor>  없음. /redpen &lt;path&gt; 로 임의 파일을 열 수 있습니다.</Text>}
+              {entries.map((_, i) => item(i + 1))}
+            </Box>
+          )}
+          {parts.gaps && <Text> </Text>}
           <Box flexWrap="wrap" columnGap={2}>
-            <Text dimColor>1 마지막 답변 열기 · 2-9 파일 열기</Text>
+            {parts.hint && LIST_KEYS.map(keyHint)}
             <Button plain key="key-0" hotkey="0" label={`전송 (${all.length})`} onPress={() => void submit($)} />
-            <Text dimColor>Esc 프롬프트로</Text>
           </Box>
+          {parts.keys && paneKeys}
         </Box>
       )
     }
@@ -550,8 +672,8 @@ export const register: Register = on => {
       ]
     }
 
-    let footer
-    let footerRows = 2
+    // The footer, with or without the hint before the hotkeys, and the rows it takes.
+    let footerFor: (hint: boolean) => { el: JSX.Element; rows: number }
     const rangeText = lineSpan(range)
     if (v.composing !== null) {
       const composing = v.composing
@@ -561,20 +683,23 @@ export const register: Register = on => {
       const composeTitle = editing
         ? '코멘트 수정 · 모두 지우고 Enter 삭제'
         : `코멘트 ${target.side === 'old' ? '(삭제된 줄) ' : ''}L${lineSpan(target)} · 빈 Enter 취소`
-      footerRows = wrapRows(composeTitle, width).length + 1
-      footer = (
-        <Box flexDirection="column">
-          <Text>{composeTitle}</Text>
-          <Input
-            key="comment-input"
-            placeholder="코멘트 입력 후 Enter"
-            value={editing?.text ?? ''}
-            submitLabel="저장"
-            autoFocus
-            onSubmit={value => save($, value)}
-          />
-        </Box>
-      )
+      const input = {
+        el: (
+          <Box flexDirection="column">
+            <Text>{composeTitle}</Text>
+            <Input
+              key="comment-input"
+              placeholder="코멘트 입력 후 Enter"
+              value={editing?.text ?? ''}
+              submitLabel="저장"
+              autoFocus
+              onSubmit={value => save($, value)}
+            />
+          </Box>
+        ),
+        rows: wrapRows(composeTitle, width).length + 1,
+      }
+      footerFor = () => input
     } else {
       // Digits, which the Korean input method passes through as typed. Moving and
       // commenting take ↑↓ and Enter.
@@ -586,36 +711,67 @@ export const register: Register = on => {
         ['3', v.anchor === null ? '범위' : '범위 해제', () => toggleRange($)],
         ['0', `전송 (${all.length})`, () => submit($)],
       ]
-      footer = (
-        <Box flexWrap="wrap" columnGap={2}>
-          <Text dimColor>{HINT}</Text>
-          {keys.map(([hotkey, label, run]) => (
-            <Button plain key={`key-${hotkey}`} hotkey={hotkey} label={label} onPress={() => void run()} />
-          ))}
-        </Box>
-      )
-      footerRows = flowRows([cells(HINT), ...keys.map(([hotkey, label]) => cells(`${hotkey}: ${label}`))], 2, width)
+      const keyWidths = keys.map(([hotkey, label]) => cells(`${hotkey}: ${label}`))
+      footerFor = hint => ({
+        el: (
+          <Box flexWrap="wrap" columnGap={2}>
+            {hint && DOC_KEYS.map(keyHint)}
+            {keys.map(([hotkey, label, run]) => (
+              <Button plain key={`key-${hotkey}`} hotkey={hotkey} label={label} onPress={() => void run()} />
+            ))}
+          </Box>
+        ),
+        rows: flowRows([...(hint ? DOC_KEYS.map(hintWidth) : []), ...keyWidths], 2, width),
+      })
     }
 
     const lineNo = (r: Row) => (r.kind === 'gap' ? '' : String(r.newLine ?? r.oldLine))
     // reduce, not Math.max(...): spreading a hundred thousand rows overflows the call stack.
     const gutter = rows.reduce((n, r) => Math.max(n, lineNo(r).length), 1)
     const title = v.source.kind === 'reply' ? REPLY : relative(v.source.path, cwd)
-    const bodyRows = e.props.scroll.bodyRows
-    const noteRows = doc.note ? wrapRows(doc.note, width).length : 0
+    // The note and the count of comments that lost their place.
+    const noteRows = (doc.note ? wrapRows(doc.note, width).length : 0) + (away.length > 0 ? 1 : 0)
     const awayLines = away.slice(0, 5).flatMap(({ c, why }) => commentLines(c, '  ', '?', `${why} · `))
-    // The tree must never be taller than the pane: past it the pane scrolls on its own and
-    // the ring leaves ▶ behind. When the pane is short, the comments that lost their place
-    // give way first, then the document shows fewer rows.
-    const chrome = (full: boolean) =>
+    // The tree must never be taller than the pane: past it the arrows scroll the pane instead
+    // of moving the ring, and the ring leaves ▶ behind. The parts besides the lines and the
+    // title, and the order they give way in when the pane is short: the comments that lost
+    // their place, the rule and the pane's keys, the notes, the header, the footer's hint.
+    // The first two keep five lines' room; the rest the ▶ line and one past each end of it,
+    // the least ↑ and ↓ need to move.
+    type Parts = { away: boolean; keys: boolean; notes: boolean; header: boolean; hint: boolean }
+    const chrome = (p: Parts) =>
+      (p.header ? 1 : 0) +
       1 +
-      1 +
-      noteRows +
-      (away.length > 0 ? 1 + (full ? awayLines.length : 0) : 0) +
-      footerRows
+      (p.notes ? noteRows : 0) +
+      (p.away ? awayLines.length : 0) +
+      footerFor(p.hint).rows +
+      (p.keys ? 1 + paneKeyRows(width) : 0)
+    const every: Parts = { away: true, keys: true, notes: true, header: true, hint: true }
+    const least = Math.min(3, Math.max(1, rows.filter(isLine).length))
+    const plans: [Parts, number][] = [
+      [every, 5],
+      [{ ...every, away: false }, 5],
+      [{ ...every, away: false, keys: false }, least],
+      [{ ...every, away: false, keys: false, notes: false }, least],
+      [{ ...every, away: false, keys: false, notes: false, header: false }, least],
+      [{ away: false, keys: false, notes: false, header: false, hint: false }, least],
+    ]
     // One spare row in case the footer wraps one row more than counted.
-    const full = bodyRows - chrome(true) - 1 >= 5
-    const room = Math.max(1, bodyRows - chrome(full) - 1)
+    const parts = plans.find(([p, need]) => bodyRows - chrome(p) - 1 >= need)?.[0]
+    if (parts === undefined) {
+      // Too short for even that: one row saying so, and the comment input if one is open, so
+      // a comment being written stays. Nothing to scroll, and no ring to put back.
+      lastRing = ''
+      return (
+        <Box flexDirection="column">
+          <Text color="warning" wrap="truncate-end">
+            pane 높이가 부족합니다. 창을 키우거나 Ctrl+X X로 닫으세요.
+          </Text>
+          {v.composing !== null && footerFor(false).el}
+        </Box>
+      )
+    }
+    const room = Math.max(1, bodyRows - chrome(parts) - 1)
     // Line i's text after "▶", the number and " + ", split to the pane's width; each line
     // is split once per drawing, however often the window and the blocks ask for it.
     const split = new Map<number, string[]>()
@@ -642,11 +798,19 @@ export const register: Register = on => {
     }
     // ↑ and ↓ move the ring only between the Buttons drawn, so the window always shows a line
     // past each end of it: the rows up to the nearest line there (a gap first, if one is in the
-    // way), each cut to its first row. These are the edges a window from t to b needs.
-    const above = (t: number) => (t === 0 ? [] : rows[t - 1]!.kind !== 'gap' || t === 1 ? [t - 1] : [t - 2, t - 1])
-    const below = (b: number) =>
-      b === rows.length - 1 ? [] : rows[b + 1]!.kind !== 'gap' || b === rows.length - 2 ? [b + 1] : [b + 1, b + 2]
-    const edges = (t: number, b: number) => above(t).length + below(b).length
+    // way), each cut to its first row. These are the edges a window from t to b needs; `tight`
+    // ones leave the gap out, the line's number telling the lines between are folded.
+    const above = (t: number, tight = false) =>
+      t === 0 ? [] : rows[t - 1]!.kind !== 'gap' || t === 1 ? [t - 1] : tight ? [t - 2] : [t - 2, t - 1]
+    const below = (b: number, tight = false) =>
+      b === rows.length - 1
+        ? []
+        : rows[b + 1]!.kind !== 'gap' || b === rows.length - 2
+          ? [b + 1]
+          : tight
+            ? [b + 2]
+            : [b + 1, b + 2]
+    const edges = (t: number, b: number, tight = false) => above(t, tight).length + below(b, tight).length
     let top = cursor
     let bottom = cursor
     let used = rows.length > 0 ? height(cursor) : 0
@@ -656,10 +820,12 @@ export const register: Register = on => {
         used += height(++bottom), (grew = true)
       if (top > 0 && used + height(top - 1) + edges(top - 1, bottom) <= room) used += height(--top), (grew = true)
     }
-    // In a room too small for them, the edges give way to the ▶ line.
-    const withEdges = rows.length > 0 && room > edges(top, bottom)
-    const edgeTop = withEdges ? above(top) : []
-    const edgeBottom = withEdges ? below(bottom) : []
+    // In a room too small for them, the edges drop their gaps, then give way to the ▶ line.
+    const loose = room > edges(top, bottom)
+    const tight = !loose && room > edges(top, bottom, true)
+    const withEdges = rows.length > 0 && (loose || tight)
+    const edgeTop = withEdges ? above(top, tight) : []
+    const edgeBottom = withEdges ? below(bottom, tight) : []
     const inner = room - edgeTop.length - edgeBottom.length
 
     // One line and its comments as screen rows, one element each.
@@ -708,14 +874,9 @@ export const register: Register = on => {
     }
     body = [...edgeTop.map(i => block(i)[0]!), ...body, ...edgeBottom.map(i => block(i)[0]!)]
 
-    // The pane keeps the ring on a Button by its place among the Buttons drawn, not by its key:
-    // when the window gains or loses a line above ▶, the ring lands on a neighbour and no
-    // ui.focus is raised. Whenever the drawn Buttons change, put the ring back on ▶'s element
-    // once this drawing is on screen. A try that is denied (the element not drawn in time,
-    // another move first) gets one more after a fresh drawing, aimed at ▶ as it stands then.
     const edgeKeys = (list: number[]) => list.filter(i => isLine(rows[i])).map(i => `L${i}`)
     const ring = [
-      ...(full ? away.slice(0, 5).map(({ c }) => `C${c.id}`) : []),
+      ...(parts.away ? away.slice(0, 5).map(({ c }) => `C${c.id}`) : []),
       ...edgeKeys(edgeTop),
       ...Array.from({ length: Math.max(0, bottom - top + 1) }, (_, k) => [
         `L${top + k}`,
@@ -723,36 +884,30 @@ export const register: Register = on => {
       ]).flat(),
       ...edgeKeys(edgeBottom),
     ].join(' ')
-    if (ring !== lastRing && e.props.isFocused && start !== null) {
-      const key = start
-      const retry = retrying
-      retrying = false
-      void $.clock
-        .sleep(0)
-        .then(() => tryFocus($, key))
-        .then(result => {
-          if (result?.deny === undefined || retry) return
-          retrying = true
-          lastRing = ''
-          $.ui.invalidate('ui.render')
-        })
-    }
-    lastRing = ring
+    pinRing($, ring, start, e.props.isFocused)
 
     return (
       <Box flexDirection="column">
-        {header}
+        {parts.header && header}
         <Text bold wrap="truncate-end">
           {title}
           {v.whole ? ' · 전체' : ''}
           {rows.length > 0 ? ` · L${lineNo(rows[cursor]!)}` : ''}
           {v.anchor !== null ? ` · 범위 ${rangeText}` : ''}
         </Text>
-        {doc.note && <Text color="warning">{doc.note}</Text>}
-        {away.length > 0 && <Text color="warning">표시되지 않은 코멘트 {away.length}개</Text>}
-        {full && awayLines}
+        {parts.notes && doc.note && <Text color="warning">{doc.note}</Text>}
+        {parts.notes && away.length > 0 && <Text color="warning">표시되지 않은 코멘트 {away.length}개</Text>}
+        {parts.away && awayLines}
         {body}
-        {footer}
+        {/* The document runs down to the footer, so a rule sets the keys apart from it. ASCII,
+            one cell wide on every terminal, so it spans the pane and never wraps. */}
+        {parts.keys && (
+          <Text dimColor wrap="truncate-end">
+            {'-'.repeat(width)}
+          </Text>
+        )}
+        {footerFor(parts.hint).el}
+        {parts.keys && paneKeys}
       </Box>
     )
   })
