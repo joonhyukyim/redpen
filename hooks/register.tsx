@@ -46,10 +46,6 @@ const edited = atom({ plugin: 'redpen', key: 'edited' } as const, [] as SessionF
 const snapshot = atom({ plugin: 'redpen', key: 'snapshot' } as const, [] as Held[])
 // Files opened by path, and when: offered again, with the files changed this session.
 const opened = atom({ plugin: 'redpen', key: 'opened' } as const, [] as SessionFile[])
-// 0.3.1 kept bare paths there, and a session's state outlives a /reload-plugins: such an entry
-// reads as opened at time 0.
-const openedFiles = (list: readonly (SessionFile | string)[]): SessionFile[] =>
-  list.map(f => (typeof f === 'string' ? { path: f, at: 0 } : f))
 const OPENED_MAX = 10
 const OFFERS_MAX = 8
 const view = atom({ plugin: 'redpen', key: 'view' } as const, { screen: 'list' } as View)
@@ -80,7 +76,7 @@ async function record($: Engine, path: string, base: string | null) {
 async function forget($: Engine, path: string) {
   await update($, recent, r => (r === null ? r : { ...r, files: r.files.filter(f => f.path !== path) }))
   await update($, edited, list => list.filter(f => f.path !== path))
-  await update($, opened, list => openedFiles(list).filter(f => f.path !== path))
+  await update($, opened, list => list.filter(f => f.path !== path))
 }
 
 // The files the list knows: those changed this session and those with comments.
@@ -280,7 +276,7 @@ async function openPath($: Engine, typed: string): Promise<string | null> {
   if (stat.kind !== 'file') return `${typed} 은(는) 파일이 아닙니다.`
   const path = stat.realPath ?? given
   const at = await $.clock.now()
-  await update($, opened, list => [{ path, at }, ...openedFiles(list).filter(f => f.path !== path)].slice(0, OPENED_MAX))
+  await update($, opened, list => [{ path, at }, ...list.filter(f => f.path !== path)].slice(0, OPENED_MAX))
   const changed = (await read($, recent))?.files.find(f => f.path === path)
   await openDoc($, changed ? { kind: 'diff', path, base: changed.base } : { kind: 'file', path })
   return null
@@ -304,7 +300,7 @@ async function pathOffers($: Engine, typed: string, cwd: string, home: string): 
     ...(await read($, comments)).filter(c => c.kind !== 'reply').map(c => c.path),
   ])
   const latest = new Map<string, number>()
-  for (const f of [...(await read($, edited)), ...openedFiles(await read($, opened))]) {
+  for (const f of [...(await read($, edited)), ...(await read($, opened))]) {
     if (!listed.has(f.path)) latest.set(f.path, Math.max(latest.get(f.path) ?? 0, f.at))
   }
   return [...latest]

@@ -661,19 +661,6 @@ describe('review pane', () => {
     await ui.unmount()
   })
 
-  test('opened files kept as bare paths, as 0.3.1 kept them, are still offered', async ($, on) => {
-    engine(on, { [FILE]: AFTER, '/repo/notes/plan.md': '계획\n' })
-    // The state a session holds across a /reload-plugins from 0.3.1.
-    on('state.get', ($, e, next) =>
-      (e as { key: string }).key === 'opened' ? ({ value: { value: ['/repo/notes/plan.md'], version: 1 } } as never) : next(e),
-    )
-    await editTurn($)
-    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    await ui.press({ key: 'key-1' })
-    expect((await ui.find({ key: 'O0' }))?.text.trim()).toBe('↺ notes/plan.md')
-    await ui.unmount()
-  })
-
   test('in the prompt, /redpen <path> completes the path being typed', async ($, on) => {
     engine(on, { [FILE]: AFTER, '/repo/src/fob.ts': 'x\n' })
     await editTurn($)
