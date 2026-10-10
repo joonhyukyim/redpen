@@ -20,25 +20,43 @@ export type Source =
  */
 export type Composing = { editId: string } | { lines: Pick<Comment, 'side' | 'start' | 'end' | 'excerpt'> }
 
-export type View =
-  | {
-      screen: 'list'
-      /** The entry the focus ring is on: 0 the reply, i + 1 the i-th file. */
-      cursor?: number
-      /** The path input, while open: the text typed, and why the last Enter opened nothing. */
-      path?: { text: string; error: string | null }
-    }
-  | {
-      screen: 'doc'
-      source: Source
-      cursor: number
-      anchor: number | null
-      composing: Composing | null
-      /** The comment row the focus ring is on: ▶ is drawn there instead of on the cursor line. */
-      focused: string | null
-      /** A diff shown whole, every unchanged line in place, rather than its changes alone. */
-      whole?: boolean
-    }
+export type ListView = {
+  screen: 'list'
+  /** The entry the focus ring is on: 0 the reply, i + 1 the i-th file. */
+  cursor?: number
+  /**
+   * The entry to put the focus ring on when the list is drawn, by what it opens (a path, or
+   * the reply): the document 1 went back from. Left once the ring moves.
+   */
+  at?: string
+  /** The path input, while open: the text typed, and why the last Enter opened nothing. */
+  path?: { text: string; error: string | null }
+}
+
+export type DocView = {
+  screen: 'doc'
+  source: Source
+  cursor: number
+  anchor: number | null
+  composing: Composing | null
+  /** The comment row the focus ring is on: ▶ is drawn there instead of on the cursor line. */
+  focused: string | null
+  /** A diff shown whole, every unchanged line in place, rather than its changes alone. */
+  whole?: boolean
+}
+
+/** The comments to be sent, each to edit in place before a second 0 sends them. */
+export type SendView = {
+  screen: 'send'
+  /** The comment the focus ring is on, by id: the first when absent or gone. */
+  cursor?: string
+  /** The comment whose text the input edits, while it is open. */
+  editing: string | null
+  /** The screen 0 was pressed on, which 1 goes back to as it was. */
+  from: ListView | DocView
+}
+
+export type View = ListView | DocView | SendView
 
 export type Comment = {
   id: string
@@ -53,8 +71,6 @@ export type Comment = {
   at?: number
 }
 
-export type Sent = { at: number; count: number }
-
 declare module 'claude-code' {
   interface PluginState {
     redpen: {
@@ -65,7 +81,6 @@ declare module 'claude-code' {
       opened: SessionFile[]
       view: View
       comments: Comment[]
-      sent: Sent | null
     }
   }
 }

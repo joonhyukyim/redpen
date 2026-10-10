@@ -1,80 +1,80 @@
-# redpen
+# Redpen
 
-redpen is a Claude Code mod for reviewing what Claude changed, line by line, in a pane. You leave comments on single lines or ranges, then send all of them back to Claude as one prompt.
+Redpen is a Claude Code plugin that lets you read and review documents line by line without leaving the terminal.
 
-Requires Claude Code 2.1.287 or later.
+- Read Claude's last reply or any file, line by line.
+- Comment on a single line or a range of lines you want changed.
+- Send all your comments back to Claude in a single prompt.
 
 ## Installation
 
-### From the marketplace
+**From a Claude Code session**
 
-In a Claude Code session, run:
-
-```
+```sh
 /plugin install redpen --marketplace joonhyukyim/redpen
+# Answer `y` when asked "Add marketplace?", then choose a scope.
 ```
 
-Answer `y` to the "Add marketplace?" question, then pick a scope.
-
-### From a shell
+**From a shell**
 
 ```sh
 claude plugin install redpen --marketplace joonhyukyim/redpen
+# Use `-s` to choose a scope (defaults to user).
 ```
-
-It installs for the user scope; pick another with `-s`.
 
 ## Usage
 
-| Command          | What it does |
-| ---------------- | ------------ |
-| `/redpen`        | Opens a list of Claude's last reply, the files Claude changed in its most recent turn that changed files, and the files with comments waiting to be sent |
-| `/redpen <path>` | Opens a file. If Claude changed it in that recent turn, the diff opens; otherwise the whole file. A directory is refused. The path completes in the prompt's typeahead |
+| Command          | What it does                                                                                                         |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `/redpen`        | Opens Redpen with a list of Claude's last reply, the files Claude changed in its last turn, and any files you've commented on. |
+| `/redpen <path>` | Opens the file at `<path>`. Shows the diff if Claude changed it in its last turn, or the whole file otherwise.        |
 
-The list has two parts. Under `최근 수정` are the files of Claude's most recent turn that changed files, each opening as that turn's diff; a turn that changes nothing leaves them as they are, and a turn you interrupt counts. Under `전송 대기` are the other files with comments, latest comment first, each opening whole. The session's other files are offered by `1` (see below). The list starts empty after `/clear`, a resume or a restart.
+Redpen takes keyboard focus when it opens. Press `Esc` to return to the prompt and `Ctrl+X` `Tab` to switch back to Redpen. Press `Ctrl+X` `X` to close it.
 
-The pane takes keyboard focus when it opens. If focus doesn't move to it (the prompt has text in it, a dialog is open, or another pane holds the keys), press `Ctrl+X` `Tab`, or click the pane in the fullscreen terminal. `Esc` returns focus to the prompt, and `Ctrl+X` `Tab` moves it back to the pane. To close the pane, press `Ctrl+X` `X`; `/redpen` opens it again.
+### Browsing the list
 
-### Hotkeys
+The list has two sections:
+- `최근 수정` (recently changed): files Claude changed in its last turn. Open one to see the diff from that turn.
+- `전송 대기` (pending): files with comments, in the order you first commented on them.
 
-The hotkey list is shown at the bottom of the pane (it wraps on narrow panes); while you write a comment, the input takes its place. Under it, a second line shows the pane keys described above, on every screen and while you write a comment. In a document a rule above the hotkeys sets them apart from the lines; a pane too short for the rule and that line leaves both out.
+The list is cleared after `/clear`, `/resume`, or restarting Claude.
 
-List screen
+| Hotkey      | Action                       |
+| ----------- | ---------------------------- |
+| ↑↓, `Enter` | Select an entry and open it  |
+| `1`         | Open another file            |
+| `0`         | Open the confirmation screen |
 
-| Hotkey  | Action |
-| ------- | ------ |
-| ↑↓, `Enter` | Move to an entry (Claude's last reply is always the first) and open it |
-| `1`     | Open another file (see below) |
-| `0`     | Send all comments |
+Press `1` (파일 열기) to replace the hotkey bar with a path input. Enter a path the same way as with `/redpen <path>` and press Enter to open it. Pressing Enter on an empty input closes it, and paths that aren't files won't open. While the input is empty, it suggests files changed in this session (most recent first, marked `↺`); once you start typing, it suggests matching paths. Use ↓ to move to a suggestion and Enter to select it.
 
-`1` (파일 열기) opens an input in place of the hotkeys. Type a path as for `/redpen <path>` and press Enter; an empty Enter closes it, and a path that isn't a file keeps it open with the reason. Under it are up to 8 offers, drawn dim. While the input is empty, they are the session's files not in the list, those Claude changed and those you opened by path (latest first, marked `↺`); once you type, the entries of the typed directory that complete it. Move to one with ↓ and press Enter: a directory fills the input, a file opens.
+### Reviewing a document
 
-Document screen
+| Hotkey | Action                                                                     |
+| ------ | -------------------------------------------------------------------------- |
+| `1`    | Back to the list                                                           |
+| `2`    | Toggle between changes only (diff) and the whole file                      |
+| `3`    | Start a range at the current line. Press Enter to comment on it, or `3` again to cancel |
+| `0`    | Open the confirmation screen                                               |
 
-| Key                                           | Action                                                                                                                                    |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `↓` / `↑`                                     | Move ▶ to the next / previous line or comment row.                                                                                        |
-| `Enter` on a line, or clicking its number     | Comment on the line or the range; on a line that already has a comment, edit that comment                                                 |
-| `Enter` on a comment row, or clicking its `└` | Edit that comment                                                                                                                         |
+To write a comment, press `Enter` to open the input and `Enter` again to save. Pressing `Enter` on an empty input cancels.
 
-| Hotkey                                        | Action                                                                                                                                    |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `1`                                           | Back to the list                                                                                                                          |
-| `2`                                           | On a diff, switch between the changes alone (3 lines around each, the rest folded into `⋯`) and the whole file. Switching cancels a range |
-| `3`                                           | Start a range from the ▶ line; Enter to comment or press 3 again to cancel                                                                |
-| `0`                                           | Send all comments                                                                                                                         |
+Each line can have one comment. A range comment is attached to the last line of the range. Press `Enter` on a line that already has a comment to edit it.
 
-Clicking works only in Claude Code's fullscreen layout (the alternate screen), whatever the size of the terminal window. On the main screen (`CLAUDE_CODE_NO_FLICKER=0`, and tmux by default), clicks don't reach the mod.
-
-Writing a comment: Enter opens the input, and Enter again saves. An empty Enter cancels. To edit, the input starts with the current text; clear it and press Enter to delete the comment.
-
-Each line holds one comment. A range's comment goes on its last line; if that line already has a comment, Enter edits it.
-
-Comments whose lines aren't on screen are listed under `표시되지 않은 코멘트 N개` (comments not shown); Enter on one edits it.
+Comments on lines that aren't visible in the diff appear under `표시되지 않은 코멘트 N개` (N comments not shown). Press Enter on one to edit it.
 
 ### Sending
 
-`0` sends all comments to Claude as one prompt, as if you typed it.
+Press `0` on the list or a document to open the confirmation screen.
+
+| Hotkey  | Action                                                       |
+| ------- | ------------------------------------------------------------ |
+| ↑↓      | Move between comments                                        |
+| `Enter` | Edit the selected comment in place                           |
+| `1`     | Return to the previous screen without sending                |
+| `2`     | Jump to the comment in its document                          |
+| `0`     | Send all comments to Claude as one prompt and return to the list |
+
+When you send, Claude receives a prompt like this:
 
 ```
 다음 리뷰 코멘트를 모두 반영해서 수정해줘. 코멘트가 지적한 부분 외에는 건드리지 마.
@@ -90,21 +90,10 @@ Comments whose lines aren't on screen are listed under `표시되지 않은 코�
    ...
 ```
 
-`삭제된 줄, 변경 전 기준`: a deleted line, numbered as in the old version. `위치 불명, 원래 N행`: the lines are no longer in the file; the comment was on line N.
+## Limitations and caveats
 
-When the file changes, a comment follows the text of its lines. If that text is gone, the comment is marked `위치 불명` and still sent.
-
-## Privacy
-
-redpen reads the files in its list (at the start and end of each turn, and when it shows them) and Claude's last reply, and sends a prompt only when you press `0`. It doesn't write files, run commands or use the network. Comments are kept until the session ends.
-
-## Limitations
-
-- Files Claude changes with Edit, Write or NotebookEdit are listed. A file changed earlier in the session, or with comments, is also listed when it changes any other way (Bash, an MCP tool, a subagent), once the turn ends. Any other file isn't; open it with `1` or `/redpen <path>`.
-- A file deleted during a turn leaves the list, unless it has comments.
-- If a file was edited several times in one turn, the diff shows the whole turn's change.
-- Files over 4 MiB can't be opened. A very large change is shown as one block of deleted lines and one block of added lines.
-- A notebook's diff is its raw `.ipynb` JSON.
-- In a short pane, rows other than the lines and entries are left out so that ↑↓ keep moving, and a long list shows only the entries around the focus. A pane under 6 rows (a document) or 5 rows (the list) shows only a notice.
-- `Esc` doesn't cancel; it returns focus to the prompt. Cancel a range with `3`, a new comment with an empty Enter.
-- Works in the terminal. Not supported on mobile, the VS Code panel, `claude -p` or WSL. Not tested in the Desktop app.
+- The list includes files Claude changes with Edit, Write, or NotebookEdit. Files changed earlier in the session, or that have comments, also appear at the end of a turn if they're changed some other way (Bash, an MCP tool, or a subagent). Other files don't appear; open them with `1` or `/redpen <path>`.
+- Files larger than 4 MiB can't be opened. Very large changes are shown as a single block of deleted lines followed by a single block of added lines.
+- Notebook diffs show the raw `.ipynb` JSON.
+- `Esc` doesn't cancel; it moves focus back to the prompt.
+- Works in the terminal only. Mobile, the VS Code panel, `claude -p`, and WSL aren't supported.
