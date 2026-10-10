@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Comment, Composing, Held, RecentTurn, Sent, SessionFile, Source, View } from '../types'
+import type { Comment, Composing, Held, RecentTurn, Sent, SessionFile, Source, TurnFile, View } from '../types'
 import { diffRows, splitLines } from './diff'
 import { completions, expand, splitTyped } from './paths'
 import type { Row } from './diff'
@@ -114,6 +114,29 @@ async function loadDoc($: Engine, source: Source, whole = false): Promise<Loaded
   }
   const rows = lastDiff.rows
   return { lines, rows, note: rows.every(r => r.kind === 'ctx') ? '변경분이 없습니다.' : undefined }
+}
+
+// The lines each listed diff adds and removes, by what they were counted from. A module
+// variable: a reload drops it. The list reads its files at every drawing; the counts are
+// reused while neither a file nor its base changed.
+const counted = new Map<string, { base: string; text: string; added: number; removed: number }>()
+
+async function changeCounts($: Engine, f: TurnFile) {
+  if (f.base === null) return null
+  const text = await $.fs.read(f.path).catch(() => null)
+  if (text === null) return null
+  let c = counted.get(f.path)
+  if (!c || c.base !== f.base || c.text !== text) {
+    const rows = diffRows(splitLines(f.base), splitLines(text), 0)
+    c = {
+      base: f.base,
+      text,
+      added: rows.filter(r => r.kind === 'add').length,
+      removed: rows.filter(r => r.kind === 'del').length,
+    }
+    counted.set(f.path, c)
+  }
+  return c
 }
 
 // The document as last drawn. The pane redraws on state, not when a file changes, so the
@@ -502,7 +525,20 @@ async function toggleWhole($: Engine) {
   const next = (await loadDoc($, v.source, whole)).rows
   const same = (r: Row) =>
     at !== undefined && at.kind !== 'gap' && r.kind === at.kind && r.newLine === at.newLine && r.oldLine === at.oldLine
-  const cursor = Math.max(0, next.findIndex(same))
+  let cursor = next.findIndex(same)
+  if (cursor === -1) {
+    // The line folds away with the changes alone: ▶ goes to the changed line nearest it in the
+    // whole file, the upper one of two as near. Both drawings come from one diff, so a row's
+    // kind and numbers name the same line in each.
+    const id = (r: Row) => (r.kind === 'gap' ? '' : `${r.kind}:${r.newLine}:${r.oldLine}`)
+    const place = new Map(rows.map((r, i) => [id(r), i]))
+    const from = normalize(rows, v.cursor)
+    const distance = (r: Row) => Math.abs((place.get(id(r)) ?? Infinity) - from)
+    next.forEach((r, i) => {
+      if ((r.kind === 'add' || r.kind === 'del') && (cursor === -1 || distance(r) < distance(next[cursor]!))) cursor = i
+    })
+  }
+  cursor = Math.max(0, cursor)
   await setDoc($, d => ({ ...d, whole, cursor, anchor: null, focused: null }))
 }
 
@@ -608,7 +644,7 @@ export const register: Register = on => {
     // The list keeps its own cursor, so its window can follow the ring.
     const file = /^F(\d+)$/.exec(e.element ?? '')
     const entry = e.element === 'reply' ? 0 : file ? Number(file[1]) + 1 : null
-    if (entry !== null) await update($, view, v => (v.screen === 'list' ? { ...v, cursor: entry } : v))
+    if (entry !== null) await update($, view, v => (v.screen === 'list' ? { ...v, cursor: entry, at: undefined } : v))
     if (comment) {
       const v = await read($, view)
       if (v.screen === 'doc') {
@@ -668,30 +704,45 @@ export const register: Register = on => {
 
     if (v.screen === 'list') {
       // Two parts: the files the recent turn changed, each opening as that turn's diff; then the
-      // other files with comments, waiting to be sent, latest comment first, each opening whole.
-      // The session's other files are offered by 1, as files to open.
+      // other files with comments, waiting to be sent, in the order they got their first comment,
+      // each opening whole. A file keeps its place as more comments come, and a new one goes
+      // last. The session's other files are offered by 1, as files to open.
       const changed = (await read($, recent))?.files ?? []
-      const lastComment = new Map<string, number>()
+      const firstComment = new Map<string, number>()
       for (const c of all) {
-        if (c.kind !== 'reply') lastComment.set(c.path, Math.max(lastComment.get(c.path) ?? 0, c.at ?? 0))
+        if (c.kind !== 'reply') firstComment.set(c.path, Math.min(firstComment.get(c.path) ?? Infinity, c.at ?? 0))
       }
-      const earlier = [...lastComment.keys()]
+      const earlier = [...firstComment.keys()]
         .filter(path => !changed.some(f => f.path === path))
-        .sort((a, b) => lastComment.get(b)! - lastComment.get(a)!)
+        .sort((a, b) => firstComment.get(a)! - firstComment.get(b)!)
       const entries: { path: string; source: Source }[] = [
         ...changed.map(f => ({ path: f.path, source: { kind: 'diff', path: f.path, base: f.base } as Source })),
         ...earlier.map(path => ({ path, source: { kind: 'file', path } as Source })),
       ]
+      // What each entry says after its path: a diff's lines added and removed (a file the turn
+      // created as new), then its comments, when it has any.
       const counts = new Map<string, number>()
       for (const c of all) counts.set(c.path, (counts.get(c.path) ?? 0) + 1)
-      const suffix = (path: string) => ` · 코멘트 ${counts.get(path) ?? 0}`
+      const changes = new Map<string, string>()
+      const tallies = await Promise.all(changed.map(f => changeCounts($, f)))
+      changed.forEach((f, i) => {
+        const t = tallies[i]
+        if (t) changes.set(f.path, f.base === '' ? `신규 +${t.added}` : `+${t.added} -${t.removed}`)
+      })
+      const suffix = (path: string) =>
+        [changes.get(path), counts.has(path) ? `코멘트 ${counts.get(path)}` : undefined]
+          .flatMap(part => (part === undefined ? [] : [` · ${part}`]))
+          .join('')
       const home = (await $.env.get('HOME')) ?? ''
-      // The count always shows; the path takes the room left.
+      // The counts always show; the path takes the room left.
       const entryLabel = (path: string) =>
         `${fitPath(relative(path, cwd), home, Math.max(1, width - 1 - cells(suffix(path))))}${suffix(path)}`
-      // The entries the ring moves along, one row each: the reply, then the files.
+      // The entries the ring moves along, one row each: the reply, then the files. Back from a
+      // document, the ring starts on the entry it opened from, wherever that entry now stands.
       const total = 1 + entries.length
-      const cursor = Math.max(0, Math.min(v.cursor ?? 0, total - 1))
+      // Back from a document the list does not show (one opened by 1), the ring starts on the reply.
+      const back = v.at === REPLY ? 0 : entries.findIndex(x => x.path === v.at) + 1
+      const cursor = v.at !== undefined && (v.at === REPLY || back > 0) ? back : Math.max(0, Math.min(v.cursor ?? 0, total - 1))
       const keyOf = (k: number) => (k === 0 ? 'reply' : `F${k - 1}`)
       const typing = v.path
       const offers = typing === undefined ? [] : await pathOffers($, typing.text, cwd, home)
@@ -878,7 +929,8 @@ export const register: Register = on => {
       // Digits, which the Korean input method passes through as typed. Moving and
       // commenting take ↑↓ and Enter.
       const keys: [string, string, () => unknown][] = [
-        ['1', '목록', () => update($, view, (): View => ({ screen: 'list' }))],
+        // Back to the list, the ring on the entry this document opened from.
+        ['1', '목록', () => update($, view, (): View => ({ screen: 'list', at: docPath(v.source) }))],
         ...(v.source.kind === 'diff'
           ? [['2', v.whole ? '바뀐 부분만' : '전체 보기', () => toggleWhole($)] as [string, string, () => unknown]]
           : []),

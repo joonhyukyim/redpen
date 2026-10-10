@@ -25,6 +25,11 @@ export type View =
       screen: 'list'
       /** The entry the focus ring is on: 0 the reply, i + 1 the i-th file. */
       cursor?: number
+      /**
+       * The entry to put the focus ring on when the list is drawn, by what it opens (a path, or
+       * the reply): the document 1 went back from. Left once the ring moves.
+       */
+      at?: string
       /** The path input, while open: the text typed, and why the last Enter opened nothing. */
       path?: { text: string; error: string | null }
     }
