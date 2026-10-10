@@ -240,9 +240,11 @@ describe('review pane', () => {
       // rows: a b helper() c d e (all within 3 lines of context); row 2 is the added line
       await ui.press({ key: 'L2' })
       await ui.input({ key: 'comment-input', text: '한 번만 쓰이는 헬퍼라 인라인으로 풀어줘.' })
-      expect(await ui.find({ type: 'Text', text: /코멘트 1개/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: ' 코멘트 1' })).toBeDefined()
       expect((await ui.find({ key: 'key-0' }))?.text).toMatch('전송 (1)')
 
+      // 0 opens the comments to be sent; 0 there sends them.
+      await ui.press({ key: 'key-0' })
       await ui.press({ key: 'key-0' })
       expect(submitted).toEqual([
         [
@@ -253,7 +255,7 @@ describe('review pane', () => {
           '   한 번만 쓰이는 헬퍼라 인라인으로 풀어줘.',
         ].join('\n'),
       ])
-      expect(await ui.find({ type: 'Text', text: /코멘트 0개 · 마지막 전송 \d\d:\d\d \(1개\)/ })).toBeDefined()
+      expect((await ui.find({ key: 'F0' }))?.text).toBe('src/foo.ts · +1 -0')
       await ui.unmount()
     })
   }
@@ -279,6 +281,8 @@ describe('review pane', () => {
     await ui.redraw()
     expect(await ui.find({ text: /\? 위치 불명 · 범위 코멘트/ })).toBeDefined()
 
+    // 0 opens the comments to be sent; 0 there sends them.
+    await ui.press({ key: 'key-0' })
     await ui.press({ key: 'key-0' })
     expect(submitted[0]).toMatch('1. src/foo.ts (위치 불명, 원래 4-5행)\n   > c\n   > d\n   범위 코멘트')
     await ui.unmount()
@@ -292,11 +296,11 @@ describe('review pane', () => {
 
     await ui.press({ key: 'L2' })
     await ui.input({ key: 'comment-input', text: '   ' })
-    expect(await ui.find({ type: 'Text', text: /코멘트 0개/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ 코멘트 \d/ })).toBeUndefined()
 
     await ui.press({ key: 'L2' })
     await ui.input({ key: 'comment-input', text: '주석 삭제.' })
-    expect(await ui.find({ type: 'Text', text: /코멘트 1개/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: ' 코멘트 1' })).toBeDefined()
 
     // Enter on a line that has a comment opens that comment, its text in the field.
     await ui.press({ key: 'L2' })
@@ -314,14 +318,14 @@ describe('review pane', () => {
     await ui.press({ key: 'L2' })
     expect((await ui.find({ key: 'comment-input' }))?.props.value).toBe('주석 전부 삭제.')
     await ui.input({ key: 'comment-input', text: '주석 전부 삭제.' })
-    expect(await ui.find({ type: 'Text', text: /코멘트 1개/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: ' 코멘트 1' })).toBeDefined()
 
     // Enter on a comment row edits that comment; emptying it deletes it.
     const mark = await ui.find({ type: 'Button', text: '└' })
     await ui.press({ key: mark!.key! })
     expect((await ui.find({ key: 'comment-input' }))?.props.value).toBe('주석 전부 삭제.')
     await ui.input({ key: 'comment-input', text: '' })
-    expect(await ui.find({ type: 'Text', text: /코멘트 0개/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ 코멘트 \d/ })).toBeUndefined()
     await ui.unmount()
   })
 
@@ -839,6 +843,8 @@ describe('review pane', () => {
     await ui.press({ key: 'L0' })
     await ui.input({ key: 'comment-input', text: '좋아요.' })
     await ui.press({ key: 'key-1' })
+    // 0 opens the comments to be sent; 0 there sends them.
+    await ui.press({ key: 'key-0' })
     await ui.press({ key: 'key-0' })
     expect(submitted[0]).toMatch('1. Claude 마지막 답변 1행\n   > 초안입니다.\n   좋아요.')
     await ui.unmount()
@@ -851,6 +857,7 @@ describe('review pane', () => {
     await ui.press({ key: 'F0' })
     await ui.press({ key: 'L2' })
     await ui.input({ key: 'comment-input', text: '확인.' })
+    await ui.press({ key: 'key-0' })
     await Promise.all([ui.press({ key: 'key-0' }), ui.press({ key: 'key-0' })])
     expect(submitted.length).toBe(1)
     await ui.unmount()
@@ -872,6 +879,8 @@ describe('review pane', () => {
     expect(await ui.find({ type: 'Text', text: /코멘트 L3 · 빈 Enter 취소/ })).toBeDefined()
     await ui.input({ key: 'comment-input', text: '인라인으로.' })
 
+    // 0 opens the comments to be sent; 0 there sends them.
+    await ui.press({ key: 'key-0' })
     await ui.press({ key: 'key-0' })
     expect(submitted[0]).toMatch('1. src/foo.ts:4\n   > helper()\n   인라인으로.')
     await ui.unmount()
@@ -898,7 +907,7 @@ describe('review pane', () => {
     await rangeOverDeleted()
     expect((await ui.find({ key: 'comment-input' }))?.props.value).toBe('첫 코멘트')
     await ui.input({ key: 'comment-input', text: '첫 코멘트' })
-    expect(await ui.find({ type: 'Text', text: /코멘트 1개/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: ' 코멘트 1' })).toBeDefined()
     await ui.unmount()
   })
 
@@ -992,5 +1001,145 @@ describe('review pane', () => {
     expect((await ui.find({ key: 'F1' }))?.text).toBe('notes/d.md · 코멘트 1')
     expect((await ui.find({ key: 'F2' }))?.text).toBe('notes/e.md · 코멘트 2')
     await ui.unmount()
+  })
+})
+
+describe('send screen', () => {
+  // The send screen's comments, by their numbers' Buttons, in the order drawn.
+  const mountPane = ($: Engine) => $.ui.mount({ ...PANE, surface: 'terminal' })
+  type Mounted = Awaited<ReturnType<typeof mountPane>>
+  const sentKeys = async (ui: Mounted) =>
+    (await ui.findAll({ type: 'Button' })).map(b => b.key ?? '').filter(k => /^S./.test(k))
+  const comment = async (ui: Mounted, row: string, text: string) => {
+    await ui.press({ key: row })
+    await ui.input({ key: 'comment-input', text })
+  }
+
+  test('0 shows the comments by file and line, as the prompt numbers them; 1 goes back, 0 sends', async ($, on) => {
+    const d = '/repo/notes/d.md'
+    const files: Record<string, string> = { [FILE]: AFTER, [d]: 'x\ny\n' }
+    const submitted = engine(on, files)
+    await editTurn($)
+    // d first; then foo.ts on line 5 before line 3.
+    await $.command.run({ command: 'redpen', args: d } as never)
+    let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    await comment(ui, 'L0', '첫째')
+    await ui.unmount()
+    await $.command.run({ command: 'redpen', args: FILE } as never)
+    ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    await comment(ui, 'L4', '다섯째')
+    await comment(ui, 'L2', '셋째')
+    // d's line goes: its comment is drawn as a warning, in its file's place.
+    files[d] = 'z\n'
+
+    await ui.press({ key: 'key-0' })
+    expect(await ui.find({ type: 'Text', text: 'Redpen' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /전송 확인/ })).toBeUndefined()
+    expect((await ui.findAll({ type: 'Button' })).filter(b => /^S./.test(b.key ?? '')).map(b => b.text.trim())).toEqual(['1.', '2.', '3.'])
+    const places = (await ui.findAll({ type: 'Text' })).map(t => t.text).filter(t => /^ (notes|src)\//.test(t))
+    expect(places).toEqual([' notes/d.md (위치 불명, 원래 1행)', ' src/foo.ts:3', ' src/foo.ts:5'])
+    expect((await ui.find({ type: 'Text', text: /위치 불명/ }))?.props.color).toBe('warning')
+    expect(await ui.find({ type: 'Text', text: '   > helper()' })).toBeDefined()
+    expect(submitted).toEqual([])
+
+    // 1 goes back to the document as it was, ▶ on line 3.
+    await ui.press({ key: 'key-1' })
+    expect(await ui.find({ type: 'Text', text: /src\/foo\.ts · L3/ })).toBeDefined()
+    // Its title counts its own two comments, not d's.
+    expect(await ui.find({ type: 'Text', text: ' 코멘트 2' })).toBeDefined()
+    await ui.press({ key: 'key-0' })
+    await ui.press({ key: 'key-0' })
+    expect(submitted[0]).toMatch(
+      [
+        '1. notes/d.md (위치 불명, 원래 1행)',
+        '   > x',
+        '   첫째',
+        '2. src/foo.ts:3',
+        '   > helper()',
+        '   셋째',
+        '3. src/foo.ts:5',
+        '   > d',
+        '   다섯째',
+      ].join('\n'),
+    )
+    // Sent, the list comes back.
+    expect(await ui.find({ type: 'Text', text: '최근 수정' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('Enter edits a comment in place; emptied it goes, and with none left the screen goes back', async ($, on) => {
+    engine(on, { [FILE]: AFTER })
+    await editTurn($)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    await ui.press({ key: 'F0' })
+    await comment(ui, 'L2', '셋째')
+    await comment(ui, 'L4', '다섯째')
+    await ui.press({ key: 'key-0' })
+    const [first, second] = await sentKeys(ui)
+
+    await ui.press({ key: first! })
+    expect(await ui.find({ type: 'Text', text: '코멘트 수정 · 모두 지우고 Enter 삭제' })).toBeDefined()
+    expect((await ui.find({ key: 'comment-input' }))?.props.value).toBe('셋째')
+    await ui.input({ key: 'comment-input', text: '셋째, 고침' })
+    expect(await ui.find({ type: 'Text', text: '   셋째, 고침' })).toBeDefined()
+    expect(await ui.find({ key: 'comment-input' })).toBeUndefined()
+
+    // Emptied, the first goes and ▶ is on the one after it.
+    await ui.press({ key: first! })
+    await ui.input({ key: 'comment-input', text: '' })
+    expect(await sentKeys(ui)).toEqual([second])
+    expect((await ui.find({ key: second! }))?.props.autoFocus).toBe(true)
+    // The last one gone, the document 0 was pressed in comes back.
+    await ui.press({ key: second! })
+    await ui.input({ key: 'comment-input', text: '' })
+    expect(await sentKeys(ui)).toEqual([])
+    expect(await ui.find({ key: 'L2' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ 코멘트 \d/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('2 opens the document the comment is on, ▶ on the comment', async ($, on) => {
+    engine(on, { [FILE]: AFTER })
+    await editTurn($)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    await ui.press({ key: 'F0' })
+    await comment(ui, 'L4', '다섯째')
+    // From the list this time.
+    await ui.press({ key: 'key-1' })
+    await ui.press({ key: 'key-0' })
+    const [only] = await sentKeys(ui)
+    await ui.press({ key: 'key-2' })
+    // The recent turn's file opens as its diff, the ring on the comment's row.
+    expect(await ui.find({ key: 'key-2' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /src\/foo\.ts · L5/ })).toBeDefined()
+    expect((await ui.find({ key: `C${only!.slice(1)}` }))?.props.autoFocus).toBe(true)
+    await ui.unmount()
+  })
+
+  test('in a short pane the comments give way to a window, so ↑ and ↓ still move', async ($, on) => {
+    const notes = '/repo/notes/long.md'
+    engine(on, { [FILE]: AFTER, [notes]: Array.from({ length: 14 }, (_, k) => `줄 ${k + 1}`).join('\n') + '\n' })
+    await editTurn($)
+    await $.command.run({ command: 'redpen', args: notes } as never)
+    const tall = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    for (let k = 0; k < 12; k++) await comment(tall, `L${k}`, `코멘트 ${k + 1}: 이 줄은 출처를 밝혀 주세요.`)
+    await tall.press({ key: 'key-0' })
+    const keys = await sentKeys(tall)
+    expect(keys.length).toBe(12)
+    await tall.unmount()
+
+    for (const bodyRows of [6, 9, 14]) {
+      const props = { ...PANE.props, placement: 'inline', bodyColumns: 60, scroll: { offset: 0, bodyRows } } as const
+      const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props })
+      for (const k of [1, 2, 5, 11, 10, 0]) {
+        await arrow($, keys[k]!)
+        // Taller than the pane, the arrows would scroll it; without both neighbours, ↑ or ↓ has nowhere to go.
+        expect(rowsOf((await ui.drawn()) as El, 60)).toBeLessThanOrEqual(bodyRows)
+        expect(await ui.find({ key: keys[k]! })).toBeDefined()
+        if (k > 0) expect(await ui.find({ key: keys[k - 1]! })).toBeDefined()
+        if (k < 11) expect(await ui.find({ key: keys[k + 1]! })).toBeDefined()
+      }
+      await ui.unmount()
+    }
   })
 })

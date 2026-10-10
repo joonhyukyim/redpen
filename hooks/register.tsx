@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Comment, Composing, Held, RecentTurn, Sent, SessionFile, Source, TurnFile, View } from '../types'
+import type { Comment, Composing, Held, RecentTurn, SendView, SessionFile, Source, TurnFile, View } from '../types'
 import { diffRows, splitLines } from './diff'
 import { completions, expand, splitTyped } from './paths'
 import type { Row } from './diff'
@@ -23,6 +23,10 @@ const LIST_KEYS: KeyHint[] = [
 const DOC_KEYS: KeyHint[] = [
   ['↑↓', '이동'],
   ['Enter', '코멘트 작성/수정'],
+]
+const SEND_KEYS: KeyHint[] = [
+  ['↑↓', '이동'],
+  ['Enter', '수정'],
 ]
 // Claude Code's keys for the pane itself, the same on every screen, under each screen's own.
 const PANE_KEYS: KeyHint[] = [
@@ -50,7 +54,6 @@ const OPENED_MAX = 10
 const OFFERS_MAX = 8
 const view = atom({ plugin: 'redpen', key: 'view' } as const, { screen: 'list' } as View)
 const comments = atom({ plugin: 'redpen', key: 'comments' } as const, [] as Comment[])
-const sent = atom({ plugin: 'redpen', key: 'sent' } as const, null as Sent | null)
 
 // The path's stat with where it lands: absolute, links followed, . and .. folded.
 const statPath = ($: Engine, path: string) => $.fs.stat(path, { resolve: true }).catch(() => undefined)
@@ -180,26 +183,38 @@ function where(c: Comment, start: number | null, cwd: string) {
   return `${name}:${span(start, c)}`
 }
 
-export async function buildPrompt($: Engine, list: Comment[]): Promise<string> {
-  const cwd = await $.session.cwd()
+// A comment and the line it starts on now (null once its lines are gone).
+type Placed = { c: Comment; start: number | null }
+
+// The comments in the order the send screen shows them and the prompt sends them: those on the
+// reply first, then each file's, the files in the order of their first comment, and in a file
+// by line as it stands now, a comment that lost its place after the rest. A deleted line is
+// placed by its number before the change.
+async function arrange($: Engine, list: Comment[]): Promise<Placed[]> {
   const files = new Map<string, string[] | null>()
-  const items: string[] = []
-  for (const [i, c] of list.entries()) {
+  const placed: Placed[] = []
+  for (const c of list) {
     let lines: string[] | null | undefined
     if (c.kind !== 'reply' && c.side === 'new') {
       if (!files.has(c.path)) files.set(c.path, await $.fs.read(c.path).then(splitLines, () => null))
       lines = files.get(c.path)
     }
+    placed.push({ c, start: locate(c, lines) })
+  }
+  const first = new Map<string, number>()
+  for (const c of list) first.set(c.path, Math.min(first.get(c.path) ?? Infinity, c.at ?? 0))
+  const rank = ({ c }: Placed) => (c.kind === 'reply' ? -1 : first.get(c.path)!)
+  const line = ({ start }: Placed) => start ?? Number.MAX_SAFE_INTEGER
+  return placed.sort((a, b) => rank(a) - rank(b) || a.c.path.localeCompare(b.c.path) || line(a) - line(b))
+}
+
+export async function buildPrompt($: Engine, list: Comment[]): Promise<string> {
+  const cwd = await $.session.cwd()
+  const items = (await arrange($, list)).map(({ c, start }, i) => {
     const shown = c.excerpt.slice(0, EXCERPT_MAX).map(text => `   > ${text}`)
     if (c.excerpt.length > EXCERPT_MAX) shown.push(`   > …(${c.excerpt.length - EXCERPT_MAX}줄 생략)`)
-    items.push(
-      [
-        `${i + 1}. ${where(c, locate(c, lines), cwd)}`,
-        ...shown,
-        ...c.text.split('\n').map(text => `   ${text}`),
-      ].join('\n'),
-    )
-  }
+    return [`${i + 1}. ${where(c, start, cwd)}`, ...shown, ...c.text.split('\n').map(text => `   ${text}`)].join('\n')
+  })
   return [HEADER, '', ...items].join('\n')
 }
 
@@ -221,11 +236,8 @@ async function submit($: Engine) {
     $.ui.toast('프롬프트를 만들지 못했습니다.')
     return
   }
-  const at = await $.clock.now()
-  await update($, sent, () => ({ at, count: list.length }))
   const undo = async (message: string) => {
     await putBack()
-    await update($, sent, () => null)
     $.ui.toast(message)
   }
   // Resolves only when the turn starts, so it is not awaited while Claude may be working.
@@ -383,11 +395,6 @@ function pinRing($: Engine, ring: string, start: string | null, isFocused: boole
       })
   }
   lastRing = ring
-}
-
-const clock = (at: number) => {
-  const d = new Date(at)
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
 // Fits a path into `width` cells, keeping the file name: the home directory becomes ~,
@@ -549,6 +556,77 @@ async function toggleRange($: Engine) {
   await setDoc($, d => ({ ...d, anchor: d.anchor === null ? normalize(rows, d.cursor) : null }))
 }
 
+// 0 on the list or a document: the comments to be sent, for a second 0 to send. With none,
+// it says so and stays.
+async function openSend($: Engine) {
+  if ((await read($, comments)).length === 0) {
+    $.ui.toast('보낼 코멘트가 없습니다.')
+    return
+  }
+  await update($, view, (v): View => (v.screen === 'send' ? v : { screen: 'send', editing: null, from: v }))
+}
+
+// 0 on the send screen: everything goes, and the list comes back.
+async function sendAll($: Engine) {
+  await submit($)
+  await update($, view, (): View => ({ screen: 'list' }))
+}
+
+async function setSend($: Engine, fn: (v: SendView) => SendView) {
+  await update($, view, v => (v.screen === 'send' ? fn(v) : v))
+}
+
+// Enter on (or a click of) a comment's number: its text opens for editing where it is.
+async function editSent($: Engine, id: string) {
+  await setSend($, s => ({ ...s, cursor: id, editing: id }))
+  focus($, 'comment-input')
+}
+
+// Saves the text edited on the send screen; emptied, the comment goes, ▶ to the one after it
+// (or before it, the last gone). With none left, the screen 0 was pressed on comes back.
+async function saveSent($: Engine, text: string) {
+  const v = await read($, view)
+  if (v.screen !== 'send' || v.editing === null) return
+  const id = v.editing
+  const body = text.trim()
+  let cursor = id
+  if (body === '') {
+    const order = (await arrange($, await read($, comments))).map(({ c }) => c.id)
+    const i = order.indexOf(id)
+    cursor = order[i + 1] ?? order[i - 1] ?? id
+    await update($, comments, list => list.filter(c => c.id !== id))
+  } else {
+    await update($, comments, list => list.map(c => (c.id === id ? { ...c, text: body } : c)))
+  }
+  if ((await read($, comments)).length === 0) {
+    await update($, view, () => v.from)
+    return
+  }
+  await setSend($, s => ({ ...s, cursor, editing: null }))
+  focus($, `S${cursor}`)
+}
+
+// 2 on the send screen: the document the comment is on, ▶ on the comment. A file the recent
+// turn changed opens as that diff, any other whole; a comment on a reply opens on the last.
+async function openComment($: Engine, id: string) {
+  const all = await read($, comments)
+  const c = all.find(x => x.id === id)
+  if (c === undefined) return
+  let source: Source
+  if (c.kind === 'reply') {
+    const text = await lastReply($)
+    if (text === null) return $.ui.toast('Claude의 답변이 아직 없습니다.')
+    source = { kind: 'reply', text }
+  } else {
+    const changed = (await read($, recent))?.files.find(f => f.path === c.path)
+    source = changed ? { kind: 'diff', path: c.path, base: changed.base } : { kind: 'file', path: c.path }
+  }
+  const doc: Doc = { screen: 'doc', source, cursor: 0, anchor: null, composing: null, focused: id }
+  // A comment not on screen (its lines folded or gone) is listed above the lines, ▶ on it there.
+  const row = [...layout(doc, all, await loadDoc($, source)).attached].find(([, list]) => list.some(x => x.c.id === id))?.[0]
+  await update($, view, (): View => ({ ...doc, cursor: row ?? 0 }))
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -645,6 +723,9 @@ export const register: Register = on => {
     const file = /^F(\d+)$/.exec(e.element ?? '')
     const entry = e.element === 'reply' ? 0 : file ? Number(file[1]) + 1 : null
     if (entry !== null) await update($, view, v => (v.screen === 'list' ? { ...v, cursor: entry, at: undefined } : v))
+    // The send screen keeps the comment the ring is on, so its window can follow the ring.
+    const sending = /^S(.+)$/.exec(e.element ?? '')
+    if (sending) await setSend($, s => ({ ...s, cursor: sending[1]! }))
     if (comment) {
       const v = await read($, view)
       if (v.screen === 'doc') {
@@ -667,13 +748,11 @@ export const register: Register = on => {
     const bodyRows = e.props.scroll.bodyRows
     const v = await read($, view)
     const all = await read($, comments)
-    const last = await read($, sent)
     const cwd = await $.session.cwd()
 
-    // The prompt sent is in the conversation; the header only says when, and how many.
     const header = (
       <Text bold wrap="truncate-end">
-        Redpen · 코멘트 {all.length}개{last ? ` · 마지막 전송 ${clock(last.at)} (${last.count}개)` : ''}
+        Redpen
       </Text>
     )
     // A described key, as Texts: a Button would join the ring that ↑ and ↓ move along.
@@ -698,6 +777,136 @@ export const register: Register = on => {
             pane 높이가 부족합니다. 창을 키우거나 Ctrl+X X로 닫으세요.
           </Text>
           {stays}
+        </Box>
+      )
+    }
+
+    if (v.screen === 'send') {
+      // The comments as they will be sent, numbered as the prompt numbers them.
+      const items = await arrange($, all)
+      // Sent or deleted elsewhere meanwhile: nothing left but the way back.
+      if (items.length === 0) {
+        lastRing = ''
+        return (
+          <Box flexDirection="column">
+            <Text dimColor>보낼 코멘트가 없습니다.</Text>
+            <Button plain key="key-1" hotkey="1" label="뒤로가기" onPress={() => void update($, view, w => (w.screen === 'send' ? w.from : w))} />
+          </Box>
+        )
+      }
+      const at = Math.max(0, items.findIndex(({ c }) => c.id === v.cursor))
+      const keyOf = (i: number) => `S${items[i]!.c.id}`
+      const editing = all.find(c => c.id === v.editing)
+      // Each comment in one of three forms, the room deciding: whole (its place, the first line
+      // it is on, its text split to the pane's width), brief (its place, its text in one row),
+      // or one row holding both. A place whose lines are gone is drawn as a warning.
+      type Form = 'whole' | 'brief' | 'line'
+      const textWidth = Math.max(1, width - 4)
+      const textOf = (i: number) => items[i]!.c.text.replace(/\n/g, ' ')
+      const height = (i: number, form: Form) =>
+        form === 'line' ? 1 : form === 'brief' ? 2 : 1 + (items[i]!.c.excerpt.length > 0 ? 1 : 0) + wrapRows(textOf(i), textWidth).length
+      const textStyle = { color: 'suggestion', wrap: 'truncate-end' } as const
+      const item = (i: number, form: Form) => {
+        const { c, start } = items[i]!
+        const head = (
+          <Box>
+            <Text color="claude">{i === at ? '▶' : ' '}</Text>
+            <Button
+              plain
+              key={keyOf(i)}
+              autoFocus={(i === at && editing === undefined) || undefined}
+              dimColor={i !== at}
+              label={`${i + 1}.`}
+              onPress={() => editSent($, c.id)}
+            />
+            <Text color={start === null ? 'warning' : undefined} wrap="truncate-end">{` ${where(c, start, cwd)}`}</Text>
+            {form === 'line' && <Text {...textStyle}>{` · ${textOf(i)}`}</Text>}
+          </Box>
+        )
+        if (form === 'line') return [head]
+        const excerpt = form === 'whole' && c.excerpt.length > 0 ? [<Text dimColor wrap="truncate-end">{`   > ${c.excerpt[0]}`}</Text>] : []
+        const text = form === 'whole' ? wrapRows(textOf(i), textWidth) : [textOf(i)]
+        return [head, ...excerpt, ...text.map(row => <Text {...textStyle}>{`   ${row}`}</Text>)]
+      }
+
+      // The footer: the input while a comment is edited, else the keys.
+      const editTitle = '코멘트 수정 · 모두 지우고 Enter 삭제'
+      const keys: [string, string, () => unknown][] = [
+        ['1', '뒤로가기', () => update($, view, w => (w.screen === 'send' ? w.from : w))],
+        ['2', '문서 열기', () => openComment($, items[at]!.c.id)],
+        ['0', `전송 (${all.length})`, () => sendAll($)],
+      ]
+      const keyWidths = keys.map(([hotkey, label]) => cells(`${hotkey}: ${label}`))
+      const footerRows = (hint: boolean) =>
+        editing !== undefined
+          ? wrapRows(editTitle, width).length + 1
+          : flowRows([...(hint ? SEND_KEYS.map(hintWidth) : []), ...keyWidths], 2, width)
+      const footer = (hint: boolean) =>
+        editing !== undefined ? (
+          <Box flexDirection="column">
+            <Text>{editTitle}</Text>
+            <Input
+              key="comment-input"
+              placeholder="코멘트 입력 후 Enter"
+              value={editing.text}
+              submitLabel="저장"
+              autoFocus
+              onSubmit={value => saveSent($, value)}
+            />
+          </Box>
+        ) : (
+          <Box flexWrap="wrap" columnGap={2}>
+            {hint && SEND_KEYS.map(keyHint)}
+            {keys.map(([hotkey, label, run]) => (
+              <Button plain key={`key-${hotkey}`} hotkey={hotkey} label={label} onPress={() => void run()} />
+            ))}
+          </Box>
+        )
+
+      // As on the other screens, the tree must never be taller than the pane. The plans, tried
+      // in order: every comment whole, then brief; then a window of brief comments around the
+      // cursor, then of one-row ones, the window holding the cursor's and one past each end.
+      type Parts = { header: boolean; hint: boolean; keys: boolean }
+      // The header and a blank row under it give way together.
+      const chrome = (p: Parts) => (p.header ? 2 : 0) + footerRows(p.hint) + (p.keys ? 1 + paneKeysRows : 0)
+      const every: Parts = { header: true, hint: true, keys: true }
+      const total = items.length
+      const least = Math.min(3, total)
+      const plans: [Form, Parts, boolean][] = [
+        ['whole', every, false],
+        ['brief', every, false],
+        ['brief', every, true],
+        ['line', every, true],
+        ['line', { ...every, keys: false }, true],
+        ['line', { ...every, keys: false, header: false }, true],
+        ['line', { header: false, hint: false, keys: false }, true],
+      ]
+      const indexes = Array.from({ length: total }, (_, i) => i)
+      // One spare row in case the footer wraps one row more than counted.
+      const fits = ([form, p, windowed]: [Form, Parts, boolean]) => {
+        const room = bodyRows - chrome(p) - 1
+        return windowed ? room >= least * height(0, form) : indexes.reduce((n, i) => n + height(i, form), 0) <= room
+      }
+      const plan = plans.find(fits)
+      if (plan === undefined) return tooShort(editing !== undefined ? footer(false) : undefined)
+      const [form, parts, windowed] = plan
+      const room = windowed ? Math.min(total, Math.floor((bodyRows - chrome(parts) - 1) / height(0, form))) : total
+      const top = Math.max(0, Math.min(at - Math.floor((room - 1) / 2), total - room))
+      const shownItems = Array.from({ length: room }, (_, k) => top + k)
+      pinRing($, shownItems.map(keyOf).join(' '), editing === undefined ? keyOf(at) : null, e.props.isFocused)
+
+      return (
+        <Box flexDirection="column">
+          {parts.header && header}
+          {parts.header && <Text> </Text>}
+          {shownItems.flatMap(i => item(i, form))}
+          {parts.keys && (
+            <Text dimColor wrap="truncate-end">
+              {'-'.repeat(width)}
+            </Text>
+          )}
+          {footer(parts.hint)}
+          {parts.keys && paneKeys}
         </Box>
       )
     }
@@ -853,7 +1062,7 @@ export const register: Register = on => {
                 label="파일 열기"
                 onPress={() => void (setPath($, { text: '', error: null }).then(() => focus($, 'path-input')))}
               />
-              <Button plain key="key-0" hotkey="0" label={`전송 (${all.length})`} onPress={() => void submit($)} />
+              <Button plain key="key-0" hotkey="0" label={`전송 (${all.length})`} onPress={() => void openSend($)} />
             </Box>
           )}
           {parts.keys && paneKeys}
@@ -930,12 +1139,12 @@ export const register: Register = on => {
       // commenting take ↑↓ and Enter.
       const keys: [string, string, () => unknown][] = [
         // Back to the list, the ring on the entry this document opened from.
-        ['1', '목록', () => update($, view, (): View => ({ screen: 'list', at: docPath(v.source) }))],
+        ['1', '뒤로가기', () => update($, view, (): View => ({ screen: 'list', at: docPath(v.source) }))],
         ...(v.source.kind === 'diff'
           ? [['2', v.whole ? '바뀐 부분만' : '전체 보기', () => toggleWhole($)] as [string, string, () => unknown]]
           : []),
         ['3', v.anchor === null ? '범위' : '범위 해제', () => toggleRange($)],
-        ['0', `전송 (${all.length})`, () => submit($)],
+        ['0', `전송 (${all.length})`, () => openSend($)],
       ]
       const keyWidths = keys.map(([hotkey, label]) => cells(`${hotkey}: ${label}`))
       const [withHint, withoutHint] = [
@@ -957,6 +1166,7 @@ export const register: Register = on => {
     // reduce, not Math.max(...): spreading a hundred thousand rows overflows the call stack.
     const gutter = rows.reduce((n, r) => Math.max(n, lineNo(r).length), 1)
     const title = v.source.kind === 'reply' ? REPLY : relative(v.source.path, cwd)
+    const mine = all.filter(c => c.path === docPath(v.source)).length
     // The note and the count of comments that lost their place.
     const noteRows = (doc.note ? wrapRows(doc.note, width).length : 0) + (away.length > 0 ? 1 : 0)
     const awayLines = away.slice(0, 5).flatMap(({ c, why }) => commentLines(c, '  ', '?', `${why} · `))
@@ -1107,12 +1317,19 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         {parts.header && header}
-        <Text bold wrap="truncate-end">
-          {title}
-          {v.whole ? ' · 전체' : ''}
-          {rows.length > 0 ? ` · L${lineNo(rows[cursor]!)}` : ''}
-          {v.anchor !== null ? ` · 범위 ${rangeText}` : ''}
-        </Text>
+        {/* The document's own comments at the row's right end, where ▶ and a range moving
+            leave them in place; the path gives way first. */}
+        <Box>
+          <Box flexGrow={1} flexShrink={1}>
+            <Text bold wrap="truncate-end">
+              {title}
+              {v.whole ? ' · 전체' : ''}
+              {rows.length > 0 ? ` · L${lineNo(rows[cursor]!)}` : ''}
+              {v.anchor !== null ? ` · 범위 ${rangeText}` : ''}
+            </Text>
+          </Box>
+          {mine > 0 && <Text>{` 코멘트 ${mine}`}</Text>}
+        </Box>
         {parts.notes && doc.note && <Text color="warning">{doc.note}</Text>}
         {parts.notes && away.length > 0 && <Text color="warning">표시되지 않은 코멘트 {away.length}개</Text>}
         {parts.away && awayLines}
