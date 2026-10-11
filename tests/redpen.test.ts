@@ -1021,7 +1021,7 @@ describe('send screen', () => {
 
     await ui.press({ key: 'key-0' })
     expect(await ui.find({ type: 'Text', text: 'Redpen' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /전송 확인/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: '전송하시겠습니까?' })).toBeDefined()
     expect((await ui.findAll({ type: 'Button' })).filter(b => /^S./.test(b.key ?? '')).map(b => b.text.trim())).toEqual(['1.', '2.', '3.'])
     const places = (await ui.findAll({ type: 'Text' })).map(t => t.text).filter(t => /^ (notes|src)\//.test(t))
     expect(places).toEqual([' notes/d.md (위치 불명, 원래 1행)', ' src/foo.ts:3', ' src/foo.ts:5'])
@@ -1032,8 +1032,12 @@ describe('send screen', () => {
     // 1 goes back to the document as it was, ▶ on line 3.
     await ui.press({ key: 'key-1' })
     expect(await ui.find({ type: 'Text', text: /src\/foo\.ts · L3/ })).toBeDefined()
-    // Its title counts its own two comments, not d's.
+    // Its title counts its own two comments, not d's, and a blank row sets it apart from the lines.
     expect(await ui.find({ type: 'Text', text: ' 코멘트 2' })).toBeDefined()
+    const rows = ((await ui.drawn()) as El).children!.filter((k): k is El => typeof k === 'object')
+    const titleRow = rows.findIndex(k => /^src\/foo\.ts · L3/.test(textOf(k)))
+    expect(titleRow).toBeGreaterThan(-1)
+    expect(textOf(rows[titleRow + 1]!)).toBe(' ')
     await ui.press({ key: 'key-0' })
     await ui.press({ key: 'key-0' })
     expect(submitted[0]).toMatch(

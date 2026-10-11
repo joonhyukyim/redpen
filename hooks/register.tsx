@@ -862,20 +862,23 @@ export const register: Register = on => {
       // As on the other screens, the tree must never be taller than the pane. The plans, tried
       // in order: every comment whole, then brief; then a window of brief comments around the
       // cursor, then of one-row ones, the window holding the cursor's and one past each end.
-      type Parts = { header: boolean; hint: boolean; keys: boolean }
-      // The header and a blank row under it give way together.
-      const chrome = (p: Parts) => (p.header ? 2 : 0) + footerRows(p.hint) + (p.keys ? 1 + paneKeysRows : 0)
-      const every: Parts = { header: true, hint: true, keys: true }
+      // The question under the header always shows; the blank row under it gives way first.
+      type Parts = { header: boolean; gap: boolean; hint: boolean; keys: boolean }
+      const chrome = (p: Parts) =>
+        (p.header ? 1 : 0) + 1 + (p.gap ? 1 : 0) + footerRows(p.hint) + (p.keys ? 1 + paneKeysRows : 0)
+      const every: Parts = { header: true, gap: true, hint: true, keys: true }
+      const lean: Parts = { ...every, gap: false }
       const total = items.length
       const least = Math.min(3, total)
       const plans: [Form, Parts, boolean][] = [
         ['whole', every, false],
-        ['brief', every, false],
-        ['brief', every, true],
-        ['line', every, true],
-        ['line', { ...every, keys: false }, true],
-        ['line', { ...every, keys: false, header: false }, true],
-        ['line', { header: false, hint: false, keys: false }, true],
+        ['whole', lean, false],
+        ['brief', lean, false],
+        ['brief', lean, true],
+        ['line', lean, true],
+        ['line', { ...lean, keys: false }, true],
+        ['line', { ...lean, keys: false, header: false }, true],
+        ['line', { header: false, gap: false, hint: false, keys: false }, true],
       ]
       const indexes = Array.from({ length: total }, (_, i) => i)
       // One spare row in case the footer wraps one row more than counted.
@@ -894,7 +897,10 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           {parts.header && header}
-          {parts.header && <Text> </Text>}
+          <Text bold wrap="truncate-end">
+            전송하시겠습니까?
+          </Text>
+          {parts.gap && <Text> </Text>}
           {shownItems.flatMap(i => item(i, form))}
           {parts.keys && (
             <Text dimColor wrap="truncate-end">
@@ -1170,26 +1176,30 @@ export const register: Register = on => {
     // of moving the ring, and the ring leaves ▶ behind. The plans below, tried in order, give
     // way part by part; the first two keep five lines' room, the rest the ▶ line and one past
     // each end of it, the least ↑ and ↓ need to move.
-    type Parts = { away: boolean; keys: boolean; notes: boolean; header: boolean; hint: boolean }
+    type Parts = { away: boolean; gap: boolean; keys: boolean; notes: boolean; header: boolean; hint: boolean }
     const chrome = (p: Parts) =>
       (p.header ? 1 : 0) +
       1 +
+      (p.gap ? 1 : 0) +
       (p.notes ? noteRows : 0) +
       (p.away ? awayLines.length : 0) +
       footerRows(p.hint) +
       (p.keys ? 1 + paneKeysRows : 0)
-    const every: Parts = { away: true, keys: true, notes: true, header: true, hint: true }
+    const every: Parts = { away: true, gap: true, keys: true, notes: true, header: true, hint: true }
+    // The blank row under the title gives way first.
+    const lean: Parts = { ...every, gap: false }
     // Up to three lines are needed; counting stops at the third, whatever the file's length.
     let least = 0
     for (const r of rows) if (isLine(r) && ++least === 3) break
     least = Math.max(1, least)
     const plans: [Parts, number][] = [
       [every, 5],
-      [{ ...every, away: false }, 5],
-      [{ ...every, away: false, keys: false }, least],
-      [{ ...every, away: false, keys: false, notes: false }, least],
-      [{ ...every, away: false, keys: false, notes: false, header: false }, least],
-      [{ away: false, keys: false, notes: false, header: false, hint: false }, least],
+      [lean, 5],
+      [{ ...lean, away: false }, 5],
+      [{ ...lean, away: false, keys: false }, least],
+      [{ ...lean, away: false, keys: false, notes: false }, least],
+      [{ ...lean, away: false, keys: false, notes: false, header: false }, least],
+      [{ away: false, gap: false, keys: false, notes: false, header: false, hint: false }, least],
     ]
     // One spare row in case the footer wraps one row more than counted.
     const parts = plans.find(([p, need]) => bodyRows - chrome(p) - 1 >= need)?.[0]
@@ -1326,6 +1336,7 @@ export const register: Register = on => {
           </Box>
           {mine > 0 && <Text>{` 코멘트 ${mine}`}</Text>}
         </Box>
+        {parts.gap && <Text> </Text>}
         {parts.notes && doc.note && <Text color="warning">{doc.note}</Text>}
         {parts.notes && away.length > 0 && <Text color="warning">표시되지 않은 코멘트 {away.length}개</Text>}
         {parts.away && awayLines}
